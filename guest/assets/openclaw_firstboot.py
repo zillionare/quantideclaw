@@ -25,7 +25,6 @@ except ImportError:  # pragma: no cover - environment fallback only
 
 try:
     import qrcode
-    from qrcode.image.pil import PilImage
 except ImportError:
     qrcode = None
 
@@ -553,7 +552,7 @@ class FirstBootApp:
         # Title
         tk.Label(
             container,
-            text="📱 配置消息渠道",
+            text="配置消息渠道",
             font=("Noto Sans CJK SC", 20, "bold"),
             bg="#ffffff",
             fg="#1a1a1a",
@@ -580,7 +579,7 @@ class FirstBootApp:
 
         tk.Label(
             wechat_header,
-            text="💬 微信渠道",
+            text="微信渠道",
             font=("Noto Sans CJK SC", 15, "bold"),
             bg="#f8f9fa",
             fg="#07c160",  # WeChat green
@@ -593,44 +592,75 @@ class FirstBootApp:
             font=("Noto Sans CJK SC", 11),
             bg="#f8f9fa",
             activebackground="#f8f9fa",
+            command=self._toggle_weixin_widgets,
         )
         wechat_check.pack(side=tk.LEFT, padx=(15, 0))
 
-        # WeChat content area
-        wechat_content = tk.Frame(wechat_card, bg="#f8f9fa")
-        wechat_content.pack(fill=tk.X)
+        # WeChat content area - QR on left, info on right
+        self.weixin_content = tk.Frame(wechat_card, bg="#f8f9fa")
+        self.weixin_content.pack(fill=tk.X)
 
-        # Left: WeChat icon/info
-        info_frame = tk.Frame(wechat_content, bg="#f8f9fa", width=200)
-        info_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
-        info_frame.pack_propagate(False)
+        # Left: QR code display area
+        self.weixin_qr_frame = tk.Frame(self.weixin_content, bg="#f8f9fa", width=250, height=280)
+        self.weixin_qr_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        self.weixin_qr_frame.pack_propagate(False)
+
+        # Load QR code immediately
+        self._do_weixin_login()
+
+        # Right: Info text
+        wechat_info = tk.Frame(self.weixin_content, bg="#f8f9fa")
+        wechat_info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(
-            info_frame,
-            text="💬",
-            font=("Noto Sans CJK SC", 48),
+            wechat_info,
+            text="使用说明:",
+            font=("Noto Sans CJK SC", 12, "bold"),
             bg="#f8f9fa",
-            fg="#07c160",
-        ).pack(pady=(20, 10))
+            fg="#333333",
+        ).pack(anchor=tk.W, pady=(0, 10))
 
         tk.Label(
-            info_frame,
-            text="微信机器人",
-            font=("Noto Sans CJK SC", 11, "bold"),
+            wechat_info,
+            text="1. 点击左侧按钮获取二维码\n"
+                 "2. 使用你的微信（手机）扫描二维码\n"
+                 "3. 扫码后，机器人将只与你一人联系",
+            font=("Noto Sans CJK SC", 11),
+            bg="#f8f9fa",
+            fg="#555555",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        tk.Label(
+            wechat_info,
+            text="提示：二维码有效期较短，请尽快扫描",
+            font=("Noto Sans CJK SC", 10),
             bg="#f8f9fa",
             fg="#07c160",
-        ).pack()
+        ).pack(anchor=tk.W)
 
-        # Right: QR code display area
-        wechat_right = tk.Frame(wechat_content, bg="#f8f9fa")
-        wechat_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Set initial state
+        self._toggle_weixin_widgets()
 
-        # QR Code frame (initially shows button, then shows QR)
-        self.weixin_qr_frame = tk.Frame(wechat_right, bg="#f8f9fa")
-        self.weixin_qr_frame.pack(fill=tk.BOTH, expand=True)
+        # QQ Section
+        self._build_qq_section(container)
 
-        # Initial state: show login button
-        self._show_weixin_login_button()
+    def _toggle_weixin_widgets(self) -> None:
+        """Enable/disable WeChat widgets based on checkbox state."""
+        if hasattr(self, 'weixin_content'):
+            state = tk.NORMAL if self.install_weixin.get() else tk.DISABLED
+            for widget in self.weixin_content.winfo_children():
+                try:
+                    widget.configure(state=state)
+                except tk.TclError:
+                    # Some widgets don't support state
+                    pass
+                # Recursively set state for child widgets
+                for child in widget.winfo_children():
+                    try:
+                        child.configure(state=state)
+                    except tk.TclError:
+                        pass
 
     def _show_weixin_login_button(self) -> None:
         """Show the initial login button for WeChat."""
@@ -708,74 +738,59 @@ class FirstBootApp:
         for widget in self.weixin_qr_frame.winfo_children():
             widget.destroy()
 
-        tk.Label(
-            self.weixin_qr_frame,
-            text="请使用微信扫描下方二维码登录",
-            font=("Noto Sans CJK SC", 11, "bold"),
-            bg="#f8f9fa",
-            fg="#333333",
-        ).pack(pady=(0, 10))
-
         # Generate and display QR code
         if qrcode is not None and Image is not None and ImageTk is not None:
             try:
                 qr = qrcode.QRCode(
                     version=1,
                     error_correction=qrcode.constants.ERROR_CORRECT_H,
-                    box_size=6,
-                    border=2,
+                    box_size=8,
+                    border=4,
                 )
                 qr.add_data(qr_url)
                 qr.make(fit=True)
 
                 qr_img = qr.make_image(fill_color="black", back_color="white")
-                qr_img = qr_img.resize((180, 180))
+                qr_img = qr_img.resize((200, 200))
                 photo = ImageTk.PhotoImage(qr_img)
                 self.images["weixin_qr_current"] = photo
 
                 qr_label = tk.Label(self.weixin_qr_frame, image=photo, bg="#f8f9fa")
-                qr_label.pack(pady=(0, 10))
+                qr_label.pack(pady=(15, 10))
             except Exception as e:
                 tk.Label(
                     self.weixin_qr_frame,
                     text=f"二维码生成失败: {e}",
                     fg="red",
                     bg="#f8f9fa",
-                ).pack()
+                ).pack(pady=(20, 0))
         else:
             # Fallback: show URL as text
             text_widget = tk.Text(
                 self.weixin_qr_frame,
                 height=4,
-                width=40,
+                width=35,
                 font=("Monospace", 9),
                 wrap=tk.WORD,
             )
             text_widget.insert("1.0", qr_url)
             text_widget.configure(state=tk.DISABLED)
-            text_widget.pack(pady=(0, 10))
-
-        tk.Label(
-            self.weixin_qr_frame,
-            text="💡 扫码登录后，机器人将只与你一人联系",
-            font=("Noto Sans CJK SC", 10),
-            bg="#f8f9fa",
-            fg="#07c160",
-        ).pack()
+            text_widget.pack(pady=(20, 5))
 
         # Add refresh button
         refresh_btn = tk.Button(
             self.weixin_qr_frame,
             text="重新获取二维码",
             command=self._do_weixin_login,
-            bg="#f8f9fa",
-            fg="#07c160",
+            bg="#07c160",
+            fg="#ffffff",
             font=("Noto Sans CJK SC", 10),
-            relief=tk.SOLID,
-            bd=1,
+            relief=tk.FLAT,
+            padx=15,
+            pady=5,
             cursor="hand2",
         )
-        refresh_btn.pack(pady=(10, 0))
+        refresh_btn.pack(pady=(5, 0))
 
     def _build_qq_section(self, container):
         """Build QQ section - separated to avoid scope issues."""
@@ -789,7 +804,7 @@ class FirstBootApp:
 
         tk.Label(
             qq_header,
-            text="🐧 QQ Bot 渠道",
+            text="QQ Bot 渠道",
             font=("Noto Sans CJK SC", 15, "bold"),
             bg="#f8f9fa",
             fg="#12b7f5",  # QQ blue
@@ -802,15 +817,16 @@ class FirstBootApp:
             font=("Noto Sans CJK SC", 11),
             bg="#f8f9fa",
             activebackground="#f8f9fa",
+            command=self._toggle_qq_widgets,
         )
         qq_check.pack(side=tk.LEFT, padx=(15, 0))
 
         # QQ content
-        qq_content = tk.Frame(qq_card, bg="#f8f9fa")
-        qq_content.pack(fill=tk.X)
+        self.qq_content = tk.Frame(qq_card, bg="#f8f9fa")
+        self.qq_content.pack(fill=tk.X)
 
         # App ID
-        row1 = tk.Frame(qq_content, bg="#f8f9fa")
+        row1 = tk.Frame(self.qq_content, bg="#f8f9fa")
         row1.pack(fill=tk.X, pady=(0, 10))
 
         tk.Label(
@@ -823,7 +839,7 @@ class FirstBootApp:
             anchor=tk.W,
         ).pack(side=tk.LEFT)
 
-        tk.Entry(
+        self.qq_app_id_entry = tk.Entry(
             row1,
             textvariable=self.qq_app_id,
             width=30,
@@ -834,10 +850,11 @@ class FirstBootApp:
             highlightthickness=1,
             highlightcolor="#12b7f5",
             highlightbackground="#dddddd",
-        ).pack(side=tk.LEFT)
+        )
+        self.qq_app_id_entry.pack(side=tk.LEFT)
 
         # App Secret
-        row2 = tk.Frame(qq_content, bg="#f8f9fa")
+        row2 = tk.Frame(self.qq_content, bg="#f8f9fa")
         row2.pack(fill=tk.X, pady=(0, 10))
 
         tk.Label(
@@ -850,7 +867,7 @@ class FirstBootApp:
             anchor=tk.W,
         ).pack(side=tk.LEFT)
 
-        tk.Entry(
+        self.qq_app_secret_entry = tk.Entry(
             row2,
             textvariable=self.qq_app_secret,
             width=30,
@@ -862,10 +879,11 @@ class FirstBootApp:
             highlightthickness=1,
             highlightcolor="#12b7f5",
             highlightbackground="#dddddd",
-        ).pack(side=tk.LEFT)
+        )
+        self.qq_app_secret_entry.pack(side=tk.LEFT)
 
         # QQ help text with link
-        help_frame = tk.Frame(qq_content, bg="#f8f9fa")
+        help_frame = tk.Frame(self.qq_content, bg="#f8f9fa")
         help_frame.pack(anchor=tk.W, pady=(5, 0))
 
         tk.Label(
@@ -895,8 +913,15 @@ class FirstBootApp:
             fg="#888888",
         ).pack(side=tk.LEFT)
 
-        # Build QQ section
-        self._build_qq_section(container)
+        # Set initial state
+        self._toggle_qq_widgets()
+
+    def _toggle_qq_widgets(self) -> None:
+        """Enable/disable QQ widgets based on checkbox state."""
+        if hasattr(self, 'qq_app_id_entry') and hasattr(self, 'qq_app_secret_entry'):
+            state = tk.NORMAL if self.install_qqbot.get() else tk.DISABLED
+            self.qq_app_id_entry.configure(state=state)
+            self.qq_app_secret_entry.configure(state=state)
 
     def _build_pairing_step(self, parent):
         tk.Frame(parent, height=10).pack()

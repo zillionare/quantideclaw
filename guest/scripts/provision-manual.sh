@@ -220,7 +220,7 @@ fi
 EOALIAS
     chmod 0644 /etc/profile.d/python-aliases.sh
 
-    python3 -m pip install --break-system-packages --no-cache-dir edge-tts
+    python3 -m pip install --break-system-packages --no-cache-dir edge-tts qrcode[pil]
 }
 
 install_nodejs() {
