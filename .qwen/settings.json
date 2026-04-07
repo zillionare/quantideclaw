@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir *)",
+      "Bash(rm *)",
+      "Bash(brew *)",
+      "Bash(which *)",
+      "Bash(chmod *)",
+      "Bash(/users/aaronyang/workspace/openclaw-prebuild/scripts/validate.sh)",
+      "Bash(ps *)",
+      "Bash(qemu-system-aarch64 *)",
+      "Bash(packer *)",
+      "Bash(./scripts/build-arm64.sh)",
+      "Bash(curl *)"
+    ]
+  },
+  "$version": 3
+}
