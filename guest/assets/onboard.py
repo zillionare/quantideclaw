@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenClaw first-boot setup wizard."""
+"""QuantideClaw first-login onboarding wizard."""
 
 from __future__ import annotations
 
@@ -28,14 +28,14 @@ try:
 except ImportError:
     qrcode = None
 
-INSTALLER_ENV = Path("/opt/openclaw-firstboot/installer.env")
-APP_HOME = Path("/opt/openclaw-firstboot")
+INSTALLER_ENV = Path("/opt/quantideclaw-onboard/installer.env")
+APP_HOME = Path("/opt/quantideclaw-onboard")
 if (Path(__file__).resolve().parent / "openrouter.jpg").exists():
     ASSET_DIR = Path(__file__).resolve().parent
 else:
     ASSET_DIR = APP_HOME / "assets"
-MARKER_FILE = Path("/var/lib/openclaw-firstboot/completed")
-LOG_FILE = Path("/var/lib/openclaw-firstboot/setup.log")
+MARKER_FILE = Path("/var/lib/quantideclaw-onboard/completed")
+LOG_FILE = Path("/var/lib/quantideclaw-onboard/setup.log")
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 MODEL_THRESHOLD = int(dt.datetime(2025, 10, 1, tzinfo=dt.timezone.utc).timestamp())
 WELCOME_MESSAGE = "配置完成，欢迎使用。"
@@ -119,7 +119,7 @@ class FirstBootApp:
     def __init__(self, root: tk.Tk, preview: bool = False) -> None:
         self.preview = preview
         self.root = root
-        self.root.title("OpenClaw 初始化向导")
+        self.root.title("QuantideClaw 初始化向导")
         self.root.geometry("1120x920")
         self.root.minsize(980, 780)
 
@@ -134,7 +134,7 @@ class FirstBootApp:
         self.proxy_url = self.env.get("EDGE_TTS_PROXY_URL", "http://127.0.0.1:18792/v1")
         self.proxy_voice = self.env.get("EDGE_TTS_DEFAULT_VOICE", "zh-CN-XiaoxiaoNeural")
         self.browser_status_path = Path(
-            self.env.get("CHROME_STATUS_FILE", "/var/lib/openclaw-build/browser-status.txt")
+            self.env.get("CHROME_STATUS_FILE", "/var/lib/quantideclaw-build/browser-status.txt")
         )
         self.weixin_channel = self.env.get("WEIXIN_CHANNEL", "openclaw-weixin")
         self.qq_channel = self.env.get("QQBOT_CHANNEL", "qqbot")
@@ -189,7 +189,7 @@ class FirstBootApp:
 
         self.header_title = tk.Label(
             self.header,
-            text="OpenClaw 初始化向导",
+            text="QuantideClaw 初始化向导",
             fg="white",
             bg="#e41815",
             font=("Noto Sans CJK SC", 20, "bold")
@@ -308,7 +308,7 @@ class FirstBootApp:
     def _build_welcome_step(self, parent):
         tk.Label(
             parent,
-            text="欢迎使用 OpenClaw 初始化向导",
+            text="欢迎使用 QuantideClaw 初始化向导",
             font=("Noto Sans CJK SC", 18, "bold"),
             bg="#ffffff",
             relief=tk.FLAT,
@@ -317,7 +317,7 @@ class FirstBootApp:
         tk.Label(
             parent,
             text=(
-                "本向导会配置大模型、微信/QQ 机器人。配置好后，就可以通过微信/QQ 来管理 OpenClaw。\n"
+                "本向导会配置大模型、微信/QQ 机器人。配置好后，就可以通过微信/QQ 来管理 QuantideClaw。\n"
                 "在配置完成后，系统会发送一条欢迎消息。\n\n"
                 "请点击右下角的「下一步」开始操作。"
             ),
@@ -375,7 +375,7 @@ class FirstBootApp:
 
         tk.Label(
             desc_frame,
-            text="OpenClaw 每天请求超过 1 亿 token，费用非常惊人！不过，好在我们可以使用 OpenRouter 上的免费模型，从而实现免费养虾！现在我们就开始配置！",
+            text="QuantideClaw 每天请求超过 1 亿 token，费用非常惊人！不过，好在我们可以使用 OpenRouter 上的免费模型，从而实现免费养虾！现在我们就开始配置！",
             wraplength=700,
             justify=tk.LEFT,
             font=("Noto Sans CJK SC", 13),
@@ -561,7 +561,7 @@ class FirstBootApp:
         # Description
         tk.Label(
             container,
-            text="OpenClaw 可以通过微信或 QQ 与你交互。至少启用一个渠道才能完成初始化。",
+            text="QuantideClaw 可以通过微信或 QQ 与你交互。至少启用一个渠道才能完成初始化。",
             font=("Noto Sans CJK SC", 13),
             bg="#ffffff",
             fg="#333333",
@@ -1396,7 +1396,7 @@ class FirstBootApp:
     def fetch_models(self) -> None:
         self.append_log(">>> 正在获取 OpenRouter 模型列表")
         try:
-            request = urllib.request.Request(MODELS_URL, headers={"User-Agent": "openclaw-firstboot/1.0"})
+            request = urllib.request.Request(MODELS_URL, headers={"User-Agent": "quantideclaw-onboard/1.0"})
             with urllib.request.urlopen(request, timeout=20) as response:
                 payload = json.load(response)
         except Exception as exc:
@@ -1793,7 +1793,7 @@ class FirstBootApp:
         ).pack(anchor=tk.W)
         ttk.Label(
             frame,
-            text="添加完成后重新运行 /usr/local/bin/openclaw-firstboot，即可再次走完审批与欢迎消息流程。",
+            text="添加完成后重新运行 /usr/local/bin/quantideclaw-onboard，即可再次走完审批与欢迎消息流程。",
             wraplength=460,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(8, 12))
@@ -1814,7 +1814,7 @@ class FirstBootApp:
             result = self.run_command("检查 gateway 状态", "openclaw health", allow_failure=True, timeout=30)
             if result.returncode == 0:
                 return
-        raise RuntimeError("OpenClaw gateway 未能在预期时间内启动。")
+        raise RuntimeError("QuantideClaw gateway 未能在预期时间内启动。")
 
     def run_setup(self) -> None:
         try:
@@ -1822,7 +1822,7 @@ class FirstBootApp:
             confirmed = messagebox.askyesno(
                 "确认初始化" + (" [预览模式]" if self.preview else ""),
                 "确认开始初始化？\n\n"
-                "1. 写入 OpenClaw 本地配置\n"
+                "1. 写入 QuantideClaw 本地配置\n"
                 "2. 配置微信或 QQ Bot 渠道\n"
                 "3. 审批设备配对请求\n"
                 "4. 发送欢迎消息\n\n"
@@ -1850,7 +1850,7 @@ class FirstBootApp:
                 pass
             messagebox.showinfo(
                 "初始化完成" + (" (预览模式)" if self.preview else ""),
-                "OpenClaw 初始化已完成。后续会自动拉起 gateway 与 Edge-TTS 代理。",
+                "QuantideClaw 初始化已完成。后续会自动拉起 gateway 与 Edge-TTS 代理。",
             )
             self.root.destroy()
         finally:
@@ -1869,9 +1869,9 @@ class FirstBootApp:
 
         self.append_log("=" * 64)
         if self.preview:
-            self.append_log("开始执行 OpenClaw 初始化流程 [预览模式]")
+            self.append_log("开始执行 QuantideClaw 初始化流程 [预览模式]")
         else:
-            self.append_log("开始执行 OpenClaw 初始化流程")
+            self.append_log("开始执行 QuantideClaw 初始化流程")
         self.append_log("=" * 64)
 
         self.write_workspace_files(user_name, agent_name)
@@ -1881,7 +1881,7 @@ class FirstBootApp:
 
         self.run_command(
             "启动本地 gateway 和 Edge-TTS 代理",
-            "/usr/local/bin/openclaw-session-start --restart-gateway",
+            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
         )
         self.wait_for_gateway()
 
@@ -1953,7 +1953,7 @@ class FirstBootApp:
 
         self.run_command(
             "重启 gateway 以加载最新配置",
-            "/usr/local/bin/openclaw-session-start --restart-gateway",
+            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
         )
         self.wait_for_gateway()
 
@@ -1982,7 +1982,7 @@ class FirstBootApp:
 
         self.run_command(
             "配对后再次重启 gateway",
-            "/usr/local/bin/openclaw-session-start --restart-gateway",
+            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
         )
         self.wait_for_gateway()
 
@@ -2003,13 +2003,13 @@ class FirstBootApp:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="OpenClaw First-Boot Wizard")
+    parser = argparse.ArgumentParser(description="QuantideClaw Onboard Wizard")
     parser.add_argument("--preview", action="store_true", help="Run without making actual system changes (Preview Mode)")
     args = parser.parse_args()
 
     try:
         if MARKER_FILE.exists() and not args.preview:
-            print("First-boot wizard already completed. Exiting.")
+            print("QuantideClaw onboard already completed. Exiting.")
             return 0
     except PermissionError:
         pass

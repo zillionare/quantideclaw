@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=OpenClaw First Boot
-Comment=Complete the first-time OpenClaw setup
-Exec=/usr/local/bin/openclaw-firstboot-launch
+Name=QuantideClaw Onboard
+Comment=Run the QuantideClaw first-login onboarding flow
+Exec=/usr/local/bin/quantideclaw-onboard-launch
 Terminal=false
 OnlyShowIn=XFCE;
 X-GNOME-Autostart-enabled=true

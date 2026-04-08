@@ -10,11 +10,11 @@ INSTALL_DESKTOP="${INSTALL_DESKTOP:-true}"
 RUN_CLEANUP="${RUN_CLEANUP:-true}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPENCLAW_HOME="/opt/openclaw-firstboot"
+OPENCLAW_HOME="/opt/quantideclaw-onboard"
 OPENCLAW_ASSET_DIR="${OPENCLAW_HOME}/assets"
 INSTALLER_ENV="${OPENCLAW_HOME}/installer.env"
-MARKER_DIR="/var/lib/openclaw-firstboot"
-STATUS_DIR="/var/lib/openclaw-build"
+MARKER_DIR="/var/lib/quantideclaw-onboard"
+STATUS_DIR="/var/lib/quantideclaw-build"
 STATUS_FILE="${STATUS_DIR}/browser-status.txt"
 
 log_info() {
@@ -107,9 +107,9 @@ copy_payload_executable() {
 }
 
 ensure_payload_files() {
-    require_payload openclaw_firstboot.py
+    require_payload onboard.py
     require_payload edge_tts_proxy.py
-    require_payload openclaw-firstboot.desktop
+    require_payload quantideclaw-onboard.desktop
     require_payload openrouter.jpg
     require_payload quantfans.png
 }
@@ -148,7 +148,7 @@ switch_apt_mirror() {
     for source_file in /etc/apt/sources.list.d/*.sources; do
         [[ -f "${source_file}" ]] || continue
         cp "${source_file}" "${source_file}.bak" 2>/dev/null || true
-        mv "${source_file}" "${source_file}.disabled-by-openclaw"
+        mv "${source_file}" "${source_file}.disabled-by-quantideclaw"
     done
 
     cat >"${sources_file}" <<EOF
@@ -352,16 +352,16 @@ install_openclaw() {
     install -d -m 0755 "${OPENCLAW_HOME}" "${OPENCLAW_ASSET_DIR}" "${STATUS_DIR}"
 
     cat >"${INSTALLER_ENV}" <<'EOENV'
-OPENCLAW_HOME=/opt/openclaw-firstboot
-OPENCLAW_ASSETS_DIR=/opt/openclaw-firstboot/assets
+OPENCLAW_HOME=/opt/quantideclaw-onboard
+OPENCLAW_ASSETS_DIR=/opt/quantideclaw-onboard/assets
 OPENCLAW_CONFIG_PATH=~/.openclaw/openclaw.json
 OPENCLAW_WORKSPACE=~/.openclaw/workspace
 WEIXIN_PLUGIN_PACKAGE=@tencent-weixin/openclaw-weixin
-WEIXIN_CHANNEL=openclaw-weixin
+WEIXIN_CHANNEL=quantideclaw-weixin
 QQBOT_CHANNEL=qqbot
 EDGE_TTS_PROXY_URL=http://127.0.0.1:18792/v1
 EDGE_TTS_DEFAULT_VOICE=zh-CN-XiaoxiaoNeural
-CHROME_STATUS_FILE=/var/lib/openclaw-build/browser-status.txt
+CHROME_STATUS_FILE=/var/lib/quantideclaw-build/browser-status.txt
 EOENV
 
     npm install -g openclaw
@@ -390,7 +390,7 @@ configure_desktop() {
     log_info "Configuring direct boot into XFCE via LightDM..."
 
     install -d -m 0755 /etc/lightdm/lightdm.conf.d
-    cat >/etc/lightdm/lightdm.conf.d/50-openclaw-autologin.conf <<EOF
+    cat >/etc/lightdm/lightdm.conf.d/50-quantideclaw-autologin.conf <<EOF
 [Seat:*]
 autologin-user=${BUILD_USER}
 autologin-user-timeout=0
@@ -410,103 +410,37 @@ EODMRC
     systemctl mask getty@tty1.service 2>/dev/null || true
 }
 
-configure_grub() {
-    log_info "Configuring GRUB to hide boot menu and suppress boot messages..."
-
-    # Backup original grub config
-    if [[ -f /etc/default/grub ]]; then
-        cp /etc/default/grub /etc/default/grub.bak.$(date +%Y%m%d%H%M%S)
-    fi
-
-    # Configure GRUB
-    cat >/etc/default/grub <<'EOGRUB'
-GRUB_DEFAULT=0
-GRUB_TIMEOUT_STYLE=hidden
-GRUB_TIMEOUT=0
-GRUB_DISABLE_OS_PROBER=true
-GRUB_DISTRIBUTOR="`lsb_release -i -s 2> /dev/null || echo Debian`"
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0 systemd.log_level=0"
-GRUB_CMDLINE_LINUX=""
-EOGRUB
-
-    # Update GRUB configuration
-    if command -v update-grub >/dev/null 2>&1; then
-        update-grub
-    elif [[ -x /usr/sbin/update-grub ]]; then
-        /usr/sbin/update-grub
-    else
-        log_info "update-grub not found, trying grub-mkconfig..."
-        if [[ -d /boot/grub ]]; then
-            grub-mkconfig -o /boot/grub/grub.cfg
-        elif [[ -d /boot/grub2 ]]; then
-            grub-mkconfig -o /boot/grub2/grub.cfg
-        fi
-    fi
-
-    log_info "✓ GRUB configuration updated"
-}
-
-configure_boot_splash() {
-    log_info "Configuring Plymouth boot splash screen..."
-
-    # Install Plymouth and themes
-    apt-get install -y --no-install-recommends plymouth plymouth-themes || {
-        log_info "Plymouth installation failed, skipping boot splash configuration"
-        return 0
-    }
-
-    # Configure Plymouth theme (use spinner as default, it's simple and reliable)
-    if command -v plymouth-set-default-theme >/dev/null 2>&1; then
-        plymouth-set-default-theme spinner || true
-    fi
-
-    # Ensure Plymouth is enabled in initramfs
-    if [[ -f /etc/initramfs-tools/modules ]]; then
-        # Add framebuffer support if not present
-        if ! grep -q "^drm$" /etc/initramfs-tools/modules 2>/dev/null; then
-            echo "drm" >> /etc/initramfs-tools/modules
-        fi
-    fi
-
-    # Update initramfs to include Plymouth
-    if command -v update-initramfs >/dev/null 2>&1; then
-        update-initramfs -u || true
-    fi
-
-    log_info "✓ Plymouth boot splash configured"
-}
-
 install_firstboot() {
     local user_autostart_dir="/home/${BUILD_USER}/.config/autostart"
 
-    log_info "Installing first-boot wizard and XFCE autostart..."
+    log_info "Installing onboard wizard and XFCE autostart..."
 
     install -d -m 0755 "${OPENCLAW_HOME}" "${OPENCLAW_ASSET_DIR}" "${MARKER_DIR}" "${user_autostart_dir}"
 
-    copy_payload_executable openclaw_firstboot.py "${OPENCLAW_HOME}/openclaw_firstboot.py"
+    copy_payload_executable onboard.py "${OPENCLAW_HOME}/onboard.py"
     copy_payload_executable edge_tts_proxy.py "${OPENCLAW_HOME}/edge_tts_proxy.py"
     copy_payload openrouter.jpg "${OPENCLAW_ASSET_DIR}/openrouter.jpg"
     copy_payload quantfans.png "${OPENCLAW_ASSET_DIR}/quantfans.png"
-    copy_payload openclaw-firstboot.desktop /etc/xdg/autostart/openclaw-firstboot.desktop
-    copy_payload openclaw-firstboot.desktop "${user_autostart_dir}/openclaw-firstboot.desktop"
+    copy_payload quantideclaw-onboard.desktop /etc/xdg/autostart/quantideclaw-onboard.desktop
+    copy_payload quantideclaw-onboard.desktop "${user_autostart_dir}/quantideclaw-onboard.desktop"
 
-    cat >/etc/xdg/autostart/openclaw-session-start.desktop <<'EODESKTOP'
+    cat >/etc/xdg/autostart/quantideclaw-session-start.desktop <<'EODESKTOP'
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=OpenClaw Session Start
-Comment=Start the OpenClaw gateway services for this session
-Exec=/usr/local/bin/openclaw-session-start
+Name=QuantideClaw Session Start
+Comment=Start QuantideClaw background services for this session
+Exec=/usr/local/bin/quantideclaw-session-start
 Terminal=false
 OnlyShowIn=XFCE;
 X-GNOME-Autostart-enabled=true
 X-XFCE-Autostart-enabled=true
 EODESKTOP
-    chmod 0644 /etc/xdg/autostart/openclaw-session-start.desktop
-    cp /etc/xdg/autostart/openclaw-session-start.desktop "${user_autostart_dir}/openclaw-session-start.desktop"
-    chmod 0644 "${user_autostart_dir}/openclaw-session-start.desktop"
+    chmod 0644 /etc/xdg/autostart/quantideclaw-session-start.desktop
+    cp /etc/xdg/autostart/quantideclaw-session-start.desktop "${user_autostart_dir}/quantideclaw-session-start.desktop"
+    chmod 0644 "${user_autostart_dir}/quantideclaw-session-start.desktop"
 
-    cat >/usr/local/bin/openclaw-session-start <<'EOSTART'
+    cat >/usr/local/bin/quantideclaw-session-start <<'EOSTART'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -530,59 +464,59 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
 fi
 
 if ! pgrep -u "$(id -u)" -f "edge_tts_proxy.py" >/dev/null 2>&1; then
-  nohup /usr/bin/python3 /opt/openclaw-firstboot/edge_tts_proxy.py >>"$LOG_DIR/edge-tts-proxy.log" 2>&1 &
+  nohup /usr/bin/python3 /opt/quantideclaw-onboard/edge_tts_proxy.py >>"$LOG_DIR/edge-tts-proxy.log" 2>&1 &
 fi
 
 if ! pgrep -u "$(id -u)" -f "openclaw gateway" >/dev/null 2>&1; then
   nohup openclaw gateway --verbose >>"$LOG_DIR/gateway.log" 2>&1 &
 fi
 EOSTART
-    chmod 0755 /usr/local/bin/openclaw-session-start
+    chmod 0755 /usr/local/bin/quantideclaw-session-start
 
-    cat >/usr/local/bin/openclaw-firstboot <<'EOWRAP'
+    cat >/usr/local/bin/quantideclaw-onboard <<'EOWRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 
-MARKER_FILE=/var/lib/openclaw-firstboot/completed
-if command -v /usr/local/bin/openclaw-session-start >/dev/null 2>&1; then
-  /usr/local/bin/openclaw-session-start >/dev/null 2>&1 || true
+MARKER_FILE=/var/lib/quantideclaw-onboard/completed
+if command -v /usr/local/bin/quantideclaw-session-start >/dev/null 2>&1; then
+  /usr/local/bin/quantideclaw-session-start >/dev/null 2>&1 || true
 fi
 if [[ -f "$MARKER_FILE" ]]; then
   exit 0
 fi
-exec /usr/bin/python3 /opt/openclaw-firstboot/openclaw_firstboot.py
+exec /usr/bin/python3 /opt/quantideclaw-onboard/onboard.py
 EOWRAP
-    chmod 0755 /usr/local/bin/openclaw-firstboot
+    chmod 0755 /usr/local/bin/quantideclaw-onboard
 
-    cat >/usr/local/bin/openclaw-firstboot-launch <<'EOLAUNCH'
+    cat >/usr/local/bin/quantideclaw-onboard-launch <<'EOLAUNCH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-MARKER_FILE=/var/lib/openclaw-firstboot/completed
+MARKER_FILE=/var/lib/quantideclaw-onboard/completed
 
 if [[ -f "$MARKER_FILE" ]]; then
   exit 0
 fi
 
-if pgrep -u "$(id -u)" -f "/opt/openclaw-firstboot/openclaw_firstboot.py" >/dev/null 2>&1; then
+if pgrep -u "$(id -u)" -f "/opt/quantideclaw-onboard/onboard.py" >/dev/null 2>&1; then
   exit 0
 fi
 
-nohup /usr/local/bin/openclaw-firstboot >/tmp/openclaw-firstboot-launch.log 2>&1 &
+nohup /usr/local/bin/quantideclaw-onboard >/tmp/quantideclaw-onboard-launch.log 2>&1 &
 EOLAUNCH
-    chmod 0755 /usr/local/bin/openclaw-firstboot-launch
+    chmod 0755 /usr/local/bin/quantideclaw-onboard-launch
 
-        cat >/etc/profile.d/openclaw-wsl-firstboot.sh <<'EOWSL'
+        cat >/etc/profile.d/quantideclaw-wsl-onboard.sh <<'EOWSL'
 if [[ -f /run/WSL ]] && [[ $- == *i* ]] && [[ "$(id -u)" -ne 0 ]]; then
-    /usr/local/bin/openclaw-session-start >/dev/null 2>&1 || true
+    /usr/local/bin/quantideclaw-session-start >/dev/null 2>&1 || true
 
-    if [[ ! -f /var/lib/openclaw-firstboot/completed ]] && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && [[ -z "${OPENCLAW_FIRSTBOOT_SESSION_LAUNCHED:-}" ]]; then
-        export OPENCLAW_FIRSTBOOT_SESSION_LAUNCHED=1
-        nohup /usr/local/bin/openclaw-firstboot >/tmp/openclaw-firstboot-gui.log 2>&1 &
+    if [[ ! -f /var/lib/quantideclaw-onboard/completed ]] && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && [[ -z "${QUANTIDECLAW_ONBOARD_SESSION_LAUNCHED:-}" ]]; then
+        export QUANTIDECLAW_ONBOARD_SESSION_LAUNCHED=1
+        nohup /usr/local/bin/quantideclaw-onboard >/tmp/quantideclaw-onboard-gui.log 2>&1 &
     fi
 fi
 EOWSL
-        chmod 0644 /etc/profile.d/openclaw-wsl-firstboot.sh
+        chmod 0644 /etc/profile.d/quantideclaw-wsl-onboard.sh
 
     chown -R "${BUILD_USER}:${BUILD_USER}" "${OPENCLAW_HOME}" "${MARKER_DIR}" "/home/${BUILD_USER}/.config"
 }
@@ -601,7 +535,6 @@ cleanup_system() {
     find /var/log -type f -exec truncate -s 0 {} +
     find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find /usr/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    fstrim -av || true
 }
 
 main() {
@@ -609,7 +542,7 @@ main() {
     ensure_payload_files
 
     log_info "=========================================="
-    log_info "OpenClaw manual provisioning"
+    log_info "QuantideClaw manual provisioning"
     log_info "Architecture: ${TARGET_ARCH}"
     log_info "Platform: ${TARGET_PLATFORM}"
     log_info "Build user: ${BUILD_USER}"
