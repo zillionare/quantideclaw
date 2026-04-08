@@ -410,6 +410,42 @@ EODMRC
     systemctl mask getty@tty1.service 2>/dev/null || true
 }
 
+configure_grub() {
+    log_info "Configuring GRUB to hide boot menu and suppress boot messages..."
+
+    # Backup original grub config
+    if [[ -f /etc/default/grub ]]; then
+        cp /etc/default/grub /etc/default/grub.bak.$(date +%Y%m%d%H%M%S)
+    fi
+
+    # Configure GRUB
+    cat >/etc/default/grub <<'EOGRUB'
+GRUB_DEFAULT=0
+GRUB_TIMEOUT_STYLE=hidden
+GRUB_TIMEOUT=0
+GRUB_DISABLE_OS_PROBER=true
+GRUB_DISTRIBUTOR="`lsb_release -i -s 2> /dev/null || echo Debian`"
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0 systemd.log_level=0"
+GRUB_CMDLINE_LINUX=""
+EOGRUB
+
+    # Update GRUB configuration
+    if command -v update-grub >/dev/null 2>&1; then
+        update-grub
+    elif [[ -x /usr/sbin/update-grub ]]; then
+        /usr/sbin/update-grub
+    else
+        log_info "update-grub not found, trying grub-mkconfig..."
+        if [[ -d /boot/grub ]]; then
+            grub-mkconfig -o /boot/grub/grub.cfg
+        elif [[ -d /boot/grub2 ]]; then
+            grub-mkconfig -o /boot/grub2/grub.cfg
+        fi
+    fi
+
+    log_info "✓ GRUB configuration updated"
+}
+
 install_firstboot() {
     local user_autostart_dir="/home/${BUILD_USER}/.config/autostart"
 
@@ -561,6 +597,7 @@ main() {
     install_chrome_best_effort
     install_openclaw
     configure_desktop
+    configure_grub
     install_firstboot
     cleanup_system
 
