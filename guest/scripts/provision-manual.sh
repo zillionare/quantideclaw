@@ -446,6 +446,36 @@ EOGRUB
     log_info "✓ GRUB configuration updated"
 }
 
+configure_boot_splash() {
+    log_info "Configuring Plymouth boot splash screen..."
+
+    # Install Plymouth and themes
+    apt-get install -y --no-install-recommends plymouth plymouth-themes || {
+        log_info "Plymouth installation failed, skipping boot splash configuration"
+        return 0
+    }
+
+    # Configure Plymouth theme (use spinner as default, it's simple and reliable)
+    if command -v plymouth-set-default-theme >/dev/null 2>&1; then
+        plymouth-set-default-theme spinner || true
+    fi
+
+    # Ensure Plymouth is enabled in initramfs
+    if [[ -f /etc/initramfs-tools/modules ]]; then
+        # Add framebuffer support if not present
+        if ! grep -q "^drm$" /etc/initramfs-tools/modules 2>/dev/null; then
+            echo "drm" >> /etc/initramfs-tools/modules
+        fi
+    fi
+
+    # Update initramfs to include Plymouth
+    if command -v update-initramfs >/dev/null 2>&1; then
+        update-initramfs -u || true
+    fi
+
+    log_info "✓ Plymouth boot splash configured"
+}
+
 install_firstboot() {
     local user_autostart_dir="/home/${BUILD_USER}/.config/autostart"
 
@@ -598,6 +628,7 @@ main() {
     install_openclaw
     configure_desktop
     configure_grub
+    configure_boot_splash
     install_firstboot
     cleanup_system
 
