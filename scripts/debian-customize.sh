@@ -145,6 +145,12 @@ install_desktop_packages() {
         log_warn "Neither firefox-esr nor firefox is available."
     fi
 
+    if apt-cache show spice-vdagent >/dev/null 2>&1; then
+        desktop_packages+=(spice-vdagent)
+    else
+        log_warn "spice-vdagent is unavailable; host clipboard integration may not work in UTM."
+    fi
+
     apt-get install -y --no-install-recommends "${core_packages[@]}"
     apt-get install -y --no-install-recommends "${desktop_packages[@]}"
 
@@ -152,6 +158,33 @@ install_desktop_packages() {
     systemctl start accounts-daemon 2>/dev/null || true
     systemctl enable NetworkManager 2>/dev/null || true
     systemctl enable lightdm 2>/dev/null || true
+}
+
+configure_vm_integration() {
+    log_info "Configuring VM guest integration..."
+
+    if command -v spice-vdagent >/dev/null 2>&1; then
+        install -d -m 0755 /etc/xdg/autostart
+        cat >/etc/xdg/autostart/spice-vdagent.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SPICE vdagent
+Comment=Enable clipboard integration for SPICE/UTM sessions
+Exec=/usr/bin/spice-vdagent
+Terminal=false
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true
+X-XFCE-Autostart-enabled=true
+EOF
+
+        if systemctl list-unit-files 2>/dev/null | grep -q '^spice-vdagentd\.service'; then
+            systemctl enable spice-vdagentd.service 2>/dev/null || true
+            systemctl restart spice-vdagentd.service 2>/dev/null || true
+        fi
+    else
+        log_warn "spice-vdagent command not found; skipped guest clipboard integration."
+    fi
 }
 
 configure_cn_runtime_mirrors() {
@@ -341,6 +374,7 @@ guest_main() {
     configure_cn_runtime_mirrors
     ensure_build_user
     configure_lightdm
+    configure_vm_integration
     configure_grub
     configure_boot_splash
     cleanup_system
