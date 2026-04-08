@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import queue
 import re
 import secrets
 import shlex
 import subprocess
 import sys
+import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
@@ -189,6 +191,7 @@ class FirstBootApp:
         self.model_query = tk.StringVar()
         self.model_id = tk.StringVar()
         self.model_status = tk.StringVar(value="请输入 API Key 后查询免费文本模型。")
+        self.model_apply_status = tk.StringVar(value="尚未通过 openclaw 应用模型。")
         self.install_weixin = tk.BooleanVar(value=True)
         self.install_qqbot = tk.BooleanVar(value=False)
         self.weixin_target = tk.StringVar()
@@ -199,6 +202,9 @@ class FirstBootApp:
 
         self.model_results: list[dict[str, object]] = []
         self.visible_model_results: list[dict[str, object]] = []
+        self.model_query_generation = 0
+        self.model_query_in_progress = False
+        self.model_worker_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
         self.pending_mode = "nodes"
         self.pending_requests: list[dict[str, str]] = []
         self.images: dict[str, object] = {}
@@ -481,6 +487,7 @@ class FirstBootApp:
             cursor="hand2",
         )
         query_btn.pack(side=tk.LEFT)
+        self.model_query_button = query_btn
 
         # Help buttons row
         help_row = tk.Frame(input_card, bg="#f8f9fa")
@@ -534,6 +541,17 @@ class FirstBootApp:
             wraplength=760,
         )
         status_label.pack(anchor=tk.W, pady=(0, 8))
+
+        apply_status_label = tk.Label(
+            self.model_frame,
+            textvariable=self.model_apply_status,
+            font=("Noto Sans CJK SC", 10),
+            bg="#ffffff",
+            fg="#4a4a4a",
+            justify=tk.LEFT,
+            wraplength=760,
+        )
+        apply_status_label.pack(anchor=tk.W, pady=(0, 8))
 
         search_row = tk.Frame(self.model_frame, bg="#ffffff")
         search_row.pack(fill=tk.X, pady=(0, 12))
@@ -612,9 +630,178 @@ class FirstBootApp:
         if len(self.openrouter_key.get().strip()) < 10:
             messagebox.showerror("提示", "请先填入有效的 OpenRouter API Key")
             return
+        if self.model_query_in_progress:
+            messagebox.showinfo("提示", "正在查询并测试模型，请稍候。")
+            return
 
         self.model_frame.pack(fill=tk.BOTH, expand=True)
-        self.fetch_models()
+        self.model_query_generation += 1
+        query_token = self.model_query_generation
+        self.model_results = []
+        self.visible_model_results = []
+        self.model_id.set("")
+        self.model_status.set("正在查询模型列表...")
+        self.model_apply_status.set("尚未通过 openclaw 应用模型。")
+        self._apply_model_search(log_summary=False)
+        self._set_model_query_busy(True)
+        self.append_log(">>> 已启动后台模型查询与测试任务")
+        threading.Thread(
+            target=self._fetch_models_worker,
+            args=(query_token, self.openrouter_key.get().strip()),
+            daemon=True,
+        ).start()
+        self.root.after(50, lambda: self._drain_model_worker_queue(query_token))
+
+    def _set_model_query_busy(self, busy: bool) -> None:
+        self.model_query_in_progress = busy
+        if hasattr(self, "model_query_button"):
+            try:
+                self.model_query_button.configure(
+                    state=tk.DISABLED if busy else tk.NORMAL,
+                    text="查询中..." if busy else "查询免费模型",
+                )
+            except tk.TclError:
+                pass
+
+    def _fetch_models_worker(self, query_token: int, api_key: str) -> None:
+        self.model_worker_queue.put(("log", query_token, ">>> 正在获取 OpenRouter 免费文本模型列表"))
+        try:
+            request = urllib.request.Request(
+                MODELS_URL,
+                headers={"User-Agent": "quantideclaw-onboard/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.load(response)
+        except Exception as exc:
+            self.model_worker_queue.put(("error", query_token, summarize_http_error(exc)))
+            return
+
+        filtered: list[dict[str, object]] = []
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            candidate = self._extract_candidate(item)
+            if candidate is not None:
+                filtered.append(candidate)
+
+        filtered.sort(key=lambda entry: int(entry["created_ts"]), reverse=True)
+        self.model_worker_queue.put(("candidates", query_token, filtered))
+        if not filtered:
+            self.model_worker_queue.put(("done", query_token, 0, 0))
+            return
+
+        passed_count = 0
+        total = len(filtered)
+        for index, entry in enumerate(filtered, start=1):
+            model_id = str(entry["id"])
+            self.model_worker_queue.put(("progress", query_token, index, total, model_id))
+            ok, message = self._probe_model_request(model_id, api_key)
+            if ok:
+                passed_count += 1
+            self.model_worker_queue.put(("result", query_token, index - 1, model_id, ok, message))
+
+        self.model_worker_queue.put(("done", query_token, passed_count, total))
+
+    def _drain_model_worker_queue(self, query_token: int) -> None:
+        while True:
+            try:
+                event = self.model_worker_queue.get_nowait()
+            except queue.Empty:
+                break
+            event_type = str(event[0])
+            event_token = int(event[1])
+            if event_token != self.model_query_generation or event_token != query_token:
+                continue
+            if event_type == "log":
+                self.append_log(str(event[2]))
+            elif event_type == "error":
+                self._handle_model_query_error(event_token, str(event[2]))
+            elif event_type == "candidates":
+                self._install_model_candidates(event_token, list(event[2]))
+            elif event_type == "progress":
+                self._update_model_test_progress(
+                    event_token,
+                    int(event[2]),
+                    int(event[3]),
+                    str(event[4]),
+                )
+            elif event_type == "result":
+                self._record_model_test_result(
+                    event_token,
+                    int(event[2]),
+                    str(event[3]),
+                    bool(event[4]),
+                    str(event[5]),
+                )
+            elif event_type == "done":
+                self._finish_model_query(event_token, int(event[2]), int(event[3]))
+
+        if query_token == self.model_query_generation and self.model_query_in_progress:
+            self.root.after(50, lambda: self._drain_model_worker_queue(query_token))
+
+    def _handle_model_query_error(self, query_token: int, error: str) -> None:
+        if query_token != self.model_query_generation:
+            return
+        self._set_model_query_busy(False)
+        self.append_log(f"ERROR: 获取模型列表失败: {error}")
+        self.model_status.set(f"模型列表加载失败: {error}")
+
+    def _install_model_candidates(self, query_token: int, filtered: list[dict[str, object]]) -> None:
+        if query_token != self.model_query_generation:
+            return
+        self.model_results = filtered
+        self.append_log(f">>> 免费文本候选数: {len(filtered)}")
+        if not filtered:
+            self.model_status.set("当前没有符合条件的免费文本模型。")
+        else:
+            self.model_status.set(f"已查询到 {len(filtered)} 个免费文本模型，开始逐个测试...")
+        self._apply_model_search(log_summary=False)
+
+    def _update_model_test_progress(
+        self,
+        query_token: int,
+        current: int,
+        total: int,
+        model_id: str,
+    ) -> None:
+        if query_token != self.model_query_generation:
+            return
+        self.model_status.set(f"正在测试模型 {current}/{total}: {model_id}")
+        self.append_log(f">>> 测试模型 {current}/{total}: {model_id}")
+
+    def _record_model_test_result(
+        self,
+        query_token: int,
+        row_index: int,
+        model_id: str,
+        passed: bool,
+        detail: str,
+    ) -> None:
+        if query_token != self.model_query_generation:
+            return
+        if row_index >= len(self.model_results):
+            return
+        entry = self.model_results[row_index]
+        if str(entry.get("id")) != model_id:
+            return
+        entry["test_ok"] = passed
+        entry["test_status"] = "通过" if passed else "失败"
+        entry["test_message"] = detail
+        if passed:
+            self.append_log(f">>> 模型测试通过: {model_id}")
+        else:
+            self.append_log(f"WARN: 模型测试失败: {model_id} -> {detail}")
+        self._apply_model_search(log_summary=False)
+
+    def _finish_model_query(self, query_token: int, passed_count: int, total: int) -> None:
+        if query_token != self.model_query_generation:
+            return
+        self._set_model_query_busy(False)
+        if total == 0:
+            self.model_status.set("当前没有符合条件的免费文本模型。")
+            return
+        self.model_status.set(f"测试完成：{passed_count}/{total} 个模型可用。")
+        self.append_log(f">>> 测试完成，可用模型数: {passed_count} / {total}")
 
     def _build_channel_step(self, parent):
         # Main container
@@ -1466,36 +1653,7 @@ class FirstBootApp:
         self.pairing_output.configure(state=tk.DISABLED)
 
     def fetch_models(self) -> None:
-        self.append_log(">>> 正在获取 OpenRouter 免费文本模型列表")
-        self.model_status.set("正在查询模型列表...")
-        try:
-            request = urllib.request.Request(MODELS_URL, headers={"User-Agent": "quantideclaw-onboard/1.0"})
-            with urllib.request.urlopen(request, timeout=20) as response:
-                payload = json.load(response)
-        except Exception as exc:
-            self.append_log(f"ERROR: 获取模型列表失败: {exc}")
-            self.model_status.set(f"模型列表加载失败: {exc}")
-            return
-
-        filtered: list[dict[str, object]] = []
-        for item in payload.get("data", []):
-            if not isinstance(item, dict):
-                continue
-            candidate = self._extract_candidate(item)
-            if candidate is not None:
-                filtered.append(candidate)
-
-        filtered.sort(key=lambda entry: int(entry["created_ts"]), reverse=True)
-        self.model_results = filtered
-        self.append_log(f">>> 免费文本候选数: {len(filtered)}")
-        if not filtered:
-            self.model_status.set("当前没有符合条件的免费文本模型。")
-            self._apply_model_search()
-            return
-
-        self.model_status.set(f"已查询到 {len(filtered)} 个免费文本模型，开始逐个测试...")
-        self._apply_model_search()
-        self._test_model_results()
+        self._query_models_with_key()
 
     def _extract_candidate(self, model: dict[str, object]) -> dict[str, object] | None:
         model_id = str(model.get("id") or "").strip()
@@ -1533,27 +1691,7 @@ class FirstBootApp:
             "test_message": "等待连通性测试",
         }
 
-    def _test_model_results(self) -> None:
-        api_key = self.openrouter_key.get().strip()
-        passed_count = 0
-        total = len(self.model_results)
-        for index, entry in enumerate(self.model_results, start=1):
-            model_id = str(entry["id"])
-            self.model_status.set(f"正在测试模型 {index}/{total}: {model_id}")
-            self.append_log(f">>> 测试模型 {index}/{total}: {model_id}")
-            self.root.update_idletasks()
-            ok, message = self._probe_model(model_id, api_key)
-            entry["test_ok"] = ok
-            entry["test_status"] = "通过" if ok else "失败"
-            entry["test_message"] = message
-            if ok:
-                passed_count += 1
-            self._apply_model_search(log_summary=False)
-
-        self.model_status.set(f"测试完成：{passed_count}/{total} 个模型可用。")
-        self.append_log(f">>> 测试完成，可用模型数: {passed_count} / {total}")
-
-    def _probe_model(self, model_id: str, api_key: str) -> tuple[bool, str]:
+    def _probe_model_request(self, model_id: str, api_key: str) -> tuple[bool, str]:
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "Reply with OK"}],
@@ -1572,12 +1710,26 @@ class FirstBootApp:
         try:
             with urllib.request.urlopen(request, timeout=25) as response:
                 json.load(response)
-            self.append_log(f">>> 模型测试通过: {model_id}")
             return True, "通过"
         except Exception as exc:
-            message = summarize_http_error(exc)
-            self.append_log(f"WARN: 模型测试失败: {model_id} -> {message}")
-            return False, message
+            return False, summarize_http_error(exc)
+
+    def _apply_model_with_openclaw(self, model_id: str) -> None:
+        normalized_model_id = normalize_model_id(model_id)
+        command = (
+            f"OPENCLAW_CONFIG_PATH={shell_quote(str(self.config_path))} "
+            f"openclaw config set agents.defaults.model {shell_quote(normalized_model_id)}"
+        )
+        if self.preview:
+            self.model_apply_status.set(f"[预览] 将通过 openclaw 应用模型: {normalized_model_id}")
+        else:
+            self.model_apply_status.set(f"正在通过 openclaw 应用模型: {normalized_model_id}")
+        self.run_command("设置默认模型", command)
+        if self.preview:
+            self.model_apply_status.set(f"[预览] 已模拟应用模型: {normalized_model_id}")
+        else:
+            self.model_apply_status.set(f"已通过 openclaw 应用模型: {normalized_model_id}")
+        self.append_log(f">>> 当前模型已应用: {normalized_model_id}")
 
     def _apply_model_search(self, log_summary: bool = True) -> None:
         query = self.model_query.get().strip().lower()
@@ -1649,7 +1801,14 @@ class FirstBootApp:
                     self.append_log(f"WARN: 阻止选择测试失败模型: {model_id}")
                     messagebox.showwarning("模型不可用", f"该模型测试未通过，不能选择。\n\n原因: {reason}")
                     return
-                self.model_id.set(model_id)
+                try:
+                    self.model_id.set(model_id)
+                    self._apply_model_with_openclaw(model_id)
+                except Exception as exc:
+                    self.model_id.set("")
+                    self.model_apply_status.set(f"应用模型失败: {exc}")
+                    messagebox.showerror("模型应用失败", f"已选择模型，但调用 openclaw 设置失败。\n\n原因: {exc}")
+                    return
                 self.append_log(f">>> 已选择模型: {model_id}")
                 messagebox.showinfo("模型已选择", f"已选择模型: {model_id}")
 
@@ -2023,6 +2182,7 @@ class FirstBootApp:
         self.append_log(">>> 已写入 USER.md 和 IDENTITY.md")
         self.write_config(user_name, agent_name, model_id, openrouter_key)
         self.append_log(f">>> 已写入配置文件: {self.config_path}")
+        self._apply_model_with_openclaw(model_id)
 
         self.run_command(
             "启动本地 gateway 和 Edge-TTS 代理",
