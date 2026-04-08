@@ -11,11 +11,12 @@ import secrets
 import shlex
 import subprocess
 import sys
-import urllib.request
-from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+import urllib.error
+import urllib.request
 import webbrowser
+from pathlib import Path
+from tkinter import messagebox, scrolledtext, ttk
 
 try:
     from PIL import Image, ImageTk
@@ -37,17 +38,9 @@ else:
 MARKER_FILE = Path("/var/lib/quantideclaw-onboard/completed")
 LOG_FILE = Path("/var/lib/quantideclaw-onboard/setup.log")
 MODELS_URL = "https://openrouter.ai/api/v1/models"
+CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_THRESHOLD = int(dt.datetime(2025, 10, 1, tzinfo=dt.timezone.utc).timestamp())
 WELCOME_MESSAGE = "配置完成，欢迎使用。"
-MODEL_PREFIXES = {
-    "qwen/": "Qwen",
-    "xiaomi/": "Xiaomi",
-    "stepfun/": "StepFun",
-    "moonshotai/": "Moonshot",
-    "z-ai/": "Z.AI",
-    "meta-llama/": "Meta Llama",
-    "google/": "Google",
-}
 REQUEST_ID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -104,6 +97,57 @@ def parse_timestamp(model: dict[str, object]) -> int | None:
         return None
 
 
+def extract_modalities(value: object) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {part.lower() for part in re.findall(r"[a-zA-Z]+", value)}
+    if isinstance(value, (list, tuple, set)):
+        parts: set[str] = set()
+        for item in value:
+            parts |= extract_modalities(item)
+        return parts
+    return set()
+
+
+def is_text_only_model(model: dict[str, object]) -> bool:
+    architecture = model.get("architecture") or {}
+    if not isinstance(architecture, dict):
+        return True
+
+    for field_name in ("modality", "input_modalities", "output_modalities"):
+        modalities = extract_modalities(architecture.get(field_name))
+        if not modalities:
+            continue
+        if "text" not in modalities:
+            return False
+        if modalities - {"text"}:
+            return False
+
+    return True
+
+
+def infer_provider_label(model_id: str) -> str:
+    provider = model_id.split("/", 1)[0].strip()
+    if not provider:
+        return "unknown"
+    words = [part for part in re.split(r"[-_]+", provider) if part]
+    return " ".join(word.upper() if len(word) <= 2 else word.capitalize() for word in words) or provider
+
+
+def summarize_http_error(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")
+        except Exception:
+            detail = ""
+        detail = re.sub(r"\s+", " ", detail).strip()
+        if detail:
+            return f"HTTP {exc.code}: {detail[:160]}"
+        return f"HTTP {exc.code}"
+    return str(exc)
+
 def normalize_model_id(model_id: str) -> str:
     cleaned = model_id.strip()
     if cleaned.startswith("openrouter/"):
@@ -144,6 +188,7 @@ class FirstBootApp:
         self.openrouter_key = tk.StringVar()
         self.model_query = tk.StringVar()
         self.model_id = tk.StringVar()
+        self.model_status = tk.StringVar(value="请输入 API Key 后查询免费文本模型。")
         self.install_weixin = tk.BooleanVar(value=True)
         self.install_qqbot = tk.BooleanVar(value=False)
         self.weixin_target = tk.StringVar()
@@ -479,17 +524,41 @@ class FirstBootApp:
             fg="#1a1a1a",
         ).pack(side=tk.LEFT)
 
-        # Search bar with modern styling
-        # search_card = tk.Frame(self.model_frame, bg="#f8f9fa", padx=15, pady=12)
-        # search_card.pack(fill=tk.X, pady=(0, 10))
+        status_label = tk.Label(
+            self.model_frame,
+            textvariable=self.model_status,
+            font=("Noto Sans CJK SC", 11),
+            bg="#ffffff",
+            fg="#666666",
+            justify=tk.LEFT,
+            wraplength=760,
+        )
+        status_label.pack(anchor=tk.W, pady=(0, 8))
 
-        # search_inner = tk.Frame(search_card, bg="#f8f9fa")
-        # search_inner.pack(fill=tk.X)
+        search_row = tk.Frame(self.model_frame, bg="#ffffff")
+        search_row.pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(
+            search_row,
+            text="搜索:",
+            font=("Noto Sans CJK SC", 11),
+            bg="#ffffff",
+            fg="#333333",
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        search_entry = tk.Entry(
+            search_row,
+            textvariable=self.model_query,
+            width=28,
+            font=("Noto Sans CJK SC", 11),
+        )
+        search_entry.pack(side=tk.LEFT, padx=(0, 12))
+        search_entry.bind("<KeyRelease>", lambda _event: self._apply_model_search())
 
         # Hint label
         hint_label = tk.Label(
             self.model_frame,
-            text="💡 提示：单击表格中的模型进行选择",
+            text="💡 提示：查询后会自动逐个测试；双击测试通过的模型才会生效",
             font=("Noto Sans CJK SC", 10),
             bg="#ffffff",
             fg="#888888",
@@ -501,7 +570,7 @@ class FirstBootApp:
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
 
         # Create Treeview with columns
-        columns = ("date", "vendor", "model_id")
+        columns = ("date", "vendor", "model_id", "test")
         self.model_tree = ttk.Treeview(
             table_frame,
             columns=columns,
@@ -513,11 +582,16 @@ class FirstBootApp:
         self.model_tree.heading("date", text="发布日期")
         self.model_tree.heading("vendor", text="厂商")
         self.model_tree.heading("model_id", text="模型 ID")
+        self.model_tree.heading("test", text="测试结果")
 
         # Define column widths
         self.model_tree.column("date", width=100, anchor=tk.CENTER)
         self.model_tree.column("vendor", width=120, anchor=tk.W)
-        self.model_tree.column("model_id", width=400, anchor=tk.W)
+        self.model_tree.column("model_id", width=360, anchor=tk.W)
+        self.model_tree.column("test", width=220, anchor=tk.W)
+        self.model_tree.tag_configure("passed", foreground="#2e7d32")
+        self.model_tree.tag_configure("failed", foreground="#b71c1c")
+        self.model_tree.tag_configure("pending", foreground="#9e9e9e")
 
         # Add scrollbar
         tree_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.model_tree.yview)
@@ -535,13 +609,11 @@ class FirstBootApp:
             self._apply_model_search()
 
     def _query_models_with_key(self):
-        # We can implement key validation here if needed, but openrouter models list is public
-        # Still, we want them to enter a key first per requirement
         if len(self.openrouter_key.get().strip()) < 10:
             messagebox.showerror("提示", "请先填入有效的 OpenRouter API Key")
             return
 
-        self.model_frame.pack(fill=tk.BOTH, expand=True) # Show the frame
+        self.model_frame.pack(fill=tk.BOTH, expand=True)
         self.fetch_models()
 
     def _build_channel_step(self, parent):
@@ -1086,9 +1158,9 @@ class FirstBootApp:
 
     def _open_url(self, url: str) -> None:
         """Open URL in browser, trying multiple methods."""
-        import subprocess
         import shutil
-        
+        import subprocess
+
         # Try different browser commands
         browsers = ["firefox", "chromium", "chromium-browser", "google-chrome", "xdg-open"]
         
@@ -1394,14 +1466,15 @@ class FirstBootApp:
         self.pairing_output.configure(state=tk.DISABLED)
 
     def fetch_models(self) -> None:
-        self.append_log(">>> 正在获取 OpenRouter 模型列表")
+        self.append_log(">>> 正在获取 OpenRouter 免费文本模型列表")
+        self.model_status.set("正在查询模型列表...")
         try:
             request = urllib.request.Request(MODELS_URL, headers={"User-Agent": "quantideclaw-onboard/1.0"})
             with urllib.request.urlopen(request, timeout=20) as response:
                 payload = json.load(response)
         except Exception as exc:
             self.append_log(f"ERROR: 获取模型列表失败: {exc}")
-            self.model_status.set("模型列表加载失败")
+            self.model_status.set(f"模型列表加载失败: {exc}")
             return
 
         filtered: list[dict[str, object]] = []
@@ -1414,38 +1487,33 @@ class FirstBootApp:
 
         filtered.sort(key=lambda entry: int(entry["created_ts"]), reverse=True)
         self.model_results = filtered
+        self.append_log(f">>> 免费文本候选数: {len(filtered)}")
+        if not filtered:
+            self.model_status.set("当前没有符合条件的免费文本模型。")
+            self._apply_model_search()
+            return
+
+        self.model_status.set(f"已查询到 {len(filtered)} 个免费文本模型，开始逐个测试...")
         self._apply_model_search()
+        self._test_model_results()
 
     def _extract_candidate(self, model: dict[str, object]) -> dict[str, object] | None:
         model_id = str(model.get("id") or "").strip()
         if not model_id:
             return None
 
-        family = None
-        for prefix, label in MODEL_PREFIXES.items():
-            if model_id.startswith(prefix):
-                family = label
-                break
-        if family is None:
+        if not is_text_only_model(model):
             return None
-
-        # Filter: Only text models (exclude image/audio generation models)
-        architecture = model.get("architecture") or {}
-        if isinstance(architecture, dict):
-            output_modalities = architecture.get("output_modalities") or []
-            # If output_modalities exists and doesn't contain "text", skip
-            if output_modalities and "text" not in output_modalities:
-                return None
-            # Also check modality field (older format)
-            modality = architecture.get("modality") or ""
-            if modality and "text" not in str(modality).lower():
-                return None
 
         pricing = model.get("pricing") or {}
         if not isinstance(pricing, dict):
             return None
         prompt_price = parse_number(pricing.get("prompt"))
         completion_price = parse_number(pricing.get("completion"))
+        if completion_price is None:
+            completion_price = parse_number(pricing.get("output"))
+        if prompt_price is None or completion_price is None:
+            return None
         if prompt_price != 0 or completion_price != 0:
             return None
 
@@ -1457,12 +1525,61 @@ class FirstBootApp:
         return {
             "id": model_id,
             "name": str(model.get("name") or model_id),
-            "family": family,
+            "family": infer_provider_label(model_id),
             "created_ts": created_ts,
             "created_label": created_label,
+            "test_ok": False,
+            "test_status": "待测试",
+            "test_message": "等待连通性测试",
         }
 
-    def _apply_model_search(self) -> None:
+    def _test_model_results(self) -> None:
+        api_key = self.openrouter_key.get().strip()
+        passed_count = 0
+        total = len(self.model_results)
+        for index, entry in enumerate(self.model_results, start=1):
+            model_id = str(entry["id"])
+            self.model_status.set(f"正在测试模型 {index}/{total}: {model_id}")
+            self.append_log(f">>> 测试模型 {index}/{total}: {model_id}")
+            self.root.update_idletasks()
+            ok, message = self._probe_model(model_id, api_key)
+            entry["test_ok"] = ok
+            entry["test_status"] = "通过" if ok else "失败"
+            entry["test_message"] = message
+            if ok:
+                passed_count += 1
+            self._apply_model_search(log_summary=False)
+
+        self.model_status.set(f"测试完成：{passed_count}/{total} 个模型可用。")
+        self.append_log(f">>> 测试完成，可用模型数: {passed_count} / {total}")
+
+    def _probe_model(self, model_id: str, api_key: str) -> tuple[bool, str]:
+        payload = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": "Reply with OK"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+        request = urllib.request.Request(
+            CHAT_COMPLETIONS_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "quantideclaw-onboard/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                json.load(response)
+            self.append_log(f">>> 模型测试通过: {model_id}")
+            return True, "通过"
+        except Exception as exc:
+            message = summarize_http_error(exc)
+            self.append_log(f"WARN: 模型测试失败: {model_id} -> {message}")
+            return False, message
+
+    def _apply_model_search(self, log_summary: bool = True) -> None:
         query = self.model_query.get().strip().lower()
         visible = self.model_results
         if query:
@@ -1481,6 +1598,10 @@ class FirstBootApp:
                 self.model_tree.delete(item)
             # Insert new items
             for entry in visible[:200]:
+                test_status = str(entry.get("test_status") or "待测试")
+                row_tag = "passed" if entry.get("test_ok") else "failed"
+                if test_status == "待测试":
+                    row_tag = "pending"
                 self.model_tree.insert(
                     "",
                     tk.END,
@@ -1488,13 +1609,25 @@ class FirstBootApp:
                         entry["created_label"],
                         entry["family"],
                         entry["id"],
+                        test_status if test_status == "通过" else f"{test_status}: {entry.get('test_message', '')}",
                     ),
+                    tags=(row_tag,),
                 )
 
         self.visible_model_results = visible
-        self.append_log(f">>> 模型候选数: {len(visible)} / {len(self.model_results)}")
-        if visible and not self.model_id.get().strip():
-            self.model_id.set(str(visible[0]["id"]))
+        if log_summary:
+            self.append_log(f">>> 模型候选数: {len(visible)} / {len(self.model_results)}")
+        selected = self.model_id.get().strip()
+        if selected:
+            for entry in self.model_results:
+                if str(entry["id"]) == selected and not entry.get("test_ok"):
+                    self.model_id.set("")
+                    break
+        if not self.model_id.get().strip():
+            for entry in visible:
+                if entry.get("test_ok"):
+                    self.model_id.set(str(entry["id"]))
+                    break
 
     def on_model_double_click(self, _event: object | None = None) -> None:
         """Handle double-click on model tree item."""
@@ -1504,6 +1637,18 @@ class FirstBootApp:
             values = item.get("values", [])
             if values and len(values) >= 3:
                 model_id = str(values[2])  # model_id is the 3rd column
+                matched_entry = next(
+                    (entry for entry in self.model_results if str(entry["id"]) == model_id),
+                    None,
+                )
+                if matched_entry is None:
+                    messagebox.showerror("提示", "未找到所选模型的测试结果。")
+                    return
+                if not matched_entry.get("test_ok"):
+                    reason = str(matched_entry.get("test_message") or "测试未通过")
+                    self.append_log(f"WARN: 阻止选择测试失败模型: {model_id}")
+                    messagebox.showwarning("模型不可用", f"该模型测试未通过，不能选择。\n\n原因: {reason}")
+                    return
                 self.model_id.set(model_id)
                 self.append_log(f">>> 已选择模型: {model_id}")
                 messagebox.showinfo("模型已选择", f"已选择模型: {model_id}")

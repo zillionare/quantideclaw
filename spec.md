@@ -133,22 +133,18 @@
 
 ## 模型筛选规则
 
-初始化向导中的模型列表，必须以 OpenRouter 的模型接口 `https://openrouter.ai/api/v1/models` 作为唯一数据源，并按以下顺序过滤：
+初始化向导中的模型列表，必须以 OpenRouter 的模型接口 `https://openrouter.ai/api/v1/models` 作为唯一数据源，并按以下顺序过滤与校验：
 
-1. 免费条件：仅保留 `pricing.prompt == 0` 且 `pricing.completion == 0` 的模型。其他价格字段（如 `web_search`、`image`、`audio`、`input_cache_read`）暂不参与“免费模型”判断。
-2. 家族白名单：以模型 `id` 的前缀为准，而不是展示名称。允许的前缀与业务名映射如下：
-	- `qwen/*` -> `qwen`
-	- `xiaomi/*` -> `xiaomi`
-	- `stepfun/*` -> `stepflash`
-	- `moonshotai/*` -> `kimi`
-	- `z-ai/*` -> `glm`
-	- `meta-llama/*` -> `meta`
-	- `google/*` -> `google`
-3. 发布时间过滤：实现时优先使用 OpenRouter 返回的 `created` Unix 时间戳，作为可执行的“发布日期”标准；若 `created` 缺失，再尝试从 `canonical_slug` 中解析日期；若仍无法判断，则不进入默认候选列表，但允许用户手工输入 `model id`。
-4. 时间阈值：`2025-10-01T00:00:00Z` 之后，等价于“2025 年第 3 季度之后”。
-5. 默认排序：候选模型按 `created` 倒序排列，优先显示最新模型。
-6. 搜索行为：GUI 搜索框只在候选集内部搜索，匹配 `id`、`name` 和归一化后的业务名前缀；同时保留手工输入 `model id` 覆盖的能力。
-7. 空结果处理：若候选集为空，向导必须明确提示“当前白名单下无符合条件的免费模型”，并允许用户手工输入 `model id` 继续。
+1. 免费条件：仅保留 `pricing.prompt == 0`，且输出价格也为 0 的模型。输出价格优先读取 `pricing.completion`，若缺失则回退读取 `pricing.output`。其他价格字段（如 `web_search`、`image`、`audio`、`input_cache_read`）暂不参与“免费模型”判断。
+2. 文本条件：仅保留文本模型，不允许把图片、音频、视频或其他非文本模态模型混入候选集。实现时应同时检查 `architecture.modality`、`architecture.input_modalities`、`architecture.output_modalities` 等可用字段，只允许文本输入和文本输出。
+3. 不做厂商白名单过滤：不能按厂商、provider 别名或模型前缀做预过滤；只要满足“免费 + 文本 + 发布时间”条件，就必须进入候选列表。
+4. 发布时间过滤：实现时优先使用 OpenRouter 返回的 `created` Unix 时间戳，作为可执行的“发布日期”标准；若 `created` 缺失，再尝试从 `canonical_slug` 中解析日期；若仍无法判断，则不进入默认候选列表。
+5. 时间阈值：`2025-10-01T00:00:00Z` 之后，等价于“2025 年第 3 季度之后”。
+6. 默认排序：候选模型按 `created` 倒序排列，优先显示最新模型。
+7. 查询后立即测试：候选列表加载出来后，必须立刻使用用户填写的 OpenRouter API Key 对每个候选模型做一次最小请求测试，并把测试结果直接展示在 GUI 中。
+8. 禁止选择失败模型：测试失败的模型必须保留在结果列表中以便用户看到失败原因，但不允许被选中；只有测试通过的模型才允许进入最终配置。
+9. 搜索行为：GUI 搜索框只在候选集内部搜索，匹配 `id`、`name` 和推导出的 provider 名称。
+10. 空结果处理：若候选集为空，向导必须明确提示“当前没有符合条件的免费文本模型”。
 
 ## 首次启动脚本
 
