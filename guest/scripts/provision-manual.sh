@@ -16,6 +16,7 @@ INSTALLER_ENV="${OPENCLAW_HOME}/installer.env"
 MARKER_DIR="/var/lib/quantideclaw-onboard"
 STATUS_DIR="/var/lib/quantideclaw-build"
 STATUS_FILE="${STATUS_DIR}/browser-status.txt"
+OPENCLAW_WRAPPER="/usr/local/bin/quantideclaw-openclaw"
 
 log_info() {
     echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $*"
@@ -328,8 +329,93 @@ repair_openclaw_runtime_deps() {
     npm install -g @buape/carbon@0.14.0
 }
 
+install_openclaw_wrapper() {
+    cat >"${OPENCLAW_WRAPPER}" <<'EOCLAW'
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALLER_ENV=/opt/quantideclaw-onboard/installer.env
+
+trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "${value}"
+}
+
+strip_matching_quotes() {
+    local value="$1"
+    local first_char last_char
+    if [[ ${#value} -lt 2 ]]; then
+        printf '%s' "${value}"
+        return
+    fi
+    first_char="${value:0:1}"
+    last_char="${value: -1}"
+    if [[ ( "${first_char}" == '"' || "${first_char}" == "'" ) && "${last_char}" == "${first_char}" ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    printf '%s' "${value}"
+}
+
+expand_leading_tilde() {
+    local value="$1"
+    local home_dir="$2"
+    if [[ "${value}" == "~" ]]; then
+        printf '%s\n' "${home_dir}"
+    elif [[ "${value}" == ~/* ]]; then
+        printf '%s/%s\n' "${home_dir}" "${value#~/}"
+    else
+        printf '%s\n' "${value}"
+    fi
+}
+
+if [[ -r "${INSTALLER_ENV}" ]]; then
+    while IFS='=' read -r raw_key raw_value; do
+        if [[ -z "${raw_value+x}" ]]; then
+            continue
+        fi
+        key="$(trim "${raw_key}")"
+        [[ -n "${key}" ]] || continue
+        [[ "${key:0:1}" == "#" ]] && continue
+        value="$(trim "${raw_value}")"
+        value="$(strip_matching_quotes "${value}")"
+        case "${key}" in
+            OPENCLAW_HOME|OPENCLAW_ASSETS_DIR|OPENCLAW_CONFIG_PATH|OPENCLAW_WORKSPACE|WEIXIN_PLUGIN_PACKAGE|WEIXIN_CHANNEL|QQBOT_CHANNEL|EDGE_TTS_PROXY_URL|EDGE_TTS_DEFAULT_VOICE|CHROME_STATUS_FILE)
+                export "${key}=${value}"
+                ;;
+        esac
+    done <"${INSTALLER_ENV}"
+fi
+
+if [[ -z "${HOME:-}" ]]; then
+    home_from_passwd="$(getent passwd "$(id -un)" | cut -d: -f6)"
+    export HOME="${home_from_passwd:-/root}"
+fi
+
+export OPENCLAW_CONFIG_PATH="$(expand_leading_tilde "${OPENCLAW_CONFIG_PATH:-~/.openclaw/openclaw.json}" "${HOME}")"
+export OPENCLAW_WORKSPACE="$(expand_leading_tilde "${OPENCLAW_WORKSPACE:-~/.openclaw/workspace}" "${HOME}")"
+export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
+if command -v openclaw >/dev/null 2>&1; then
+    exec openclaw "$@"
+fi
+
+if command -v npm >/dev/null 2>&1; then
+    npm_root="$(npm root -g 2>/dev/null || true)"
+    if [[ -n "${npm_root}" ]] && [[ -x "${npm_root}/.bin/openclaw" ]]; then
+        exec "${npm_root}/.bin/openclaw" "$@"
+    fi
+fi
+
+echo "quantideclaw-openclaw: openclaw executable not found" >&2
+exit 127
+EOCLAW
+    chmod 0755 "${OPENCLAW_WRAPPER}"
+}
+
 validate_openclaw_runtime() {
-    if ! openclaw plugins list >/tmp/openclaw-plugins-list.log 2>&1; then
+    if ! "${OPENCLAW_WRAPPER}" plugins list >/tmp/openclaw-plugins-list.log 2>&1; then
         cat /tmp/openclaw-plugins-list.log >&2
         log_error "OpenClaw CLI failed runtime validation."
         exit 1
@@ -342,7 +428,7 @@ install_weixin_plugin_for_user() {
         plugin_root="$HOME/.openclaw"
         rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
         mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
-        openclaw plugins install @tencent-weixin/openclaw-weixin
+        /usr/local/bin/quantideclaw-openclaw plugins install @tencent-weixin/openclaw-weixin
     '
 }
 
@@ -366,6 +452,7 @@ EOENV
 
     npm install -g openclaw
     repair_openclaw_runtime_deps
+    install_openclaw_wrapper
     validate_openclaw_runtime
     install_weixin_plugin_for_user
 
@@ -446,6 +533,7 @@ set -euo pipefail
 
 CONFIG_PATH="${HOME}/.openclaw/openclaw.json"
 LOG_DIR="${HOME}/.openclaw/logs"
+OPENCLAW_WRAPPER="/usr/local/bin/quantideclaw-openclaw"
 RESTART_GATEWAY=false
 
 if [[ "${1:-}" == "--restart-gateway" ]]; then
@@ -468,7 +556,7 @@ if ! pgrep -u "$(id -u)" -f "edge_tts_proxy.py" >/dev/null 2>&1; then
 fi
 
 if ! pgrep -u "$(id -u)" -f "openclaw gateway" >/dev/null 2>&1; then
-  nohup openclaw gateway --verbose >>"$LOG_DIR/gateway.log" 2>&1 &
+  nohup "${OPENCLAW_WRAPPER}" gateway --verbose >>"$LOG_DIR/gateway.log" 2>&1 &
 fi
 EOSTART
     chmod 0755 /usr/local/bin/quantideclaw-session-start

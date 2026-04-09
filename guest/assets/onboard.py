@@ -20,6 +20,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
+import os
 
 try:
     from PIL import Image, ImageTk
@@ -44,6 +45,9 @@ MODELS_URL = "https://openrouter.ai/api/v1/models"
 CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_THRESHOLD = int(dt.datetime(2025, 10, 1, tzinfo=dt.timezone.utc).timestamp())
 WELCOME_MESSAGE = "配置完成，欢迎使用。"
+OPENCLAW_WRAPPER = Path("/usr/local/bin/quantideclaw-openclaw")
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+SHELL_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 REQUEST_ID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -236,6 +240,8 @@ class FirstBootApp:
         self.weixin_qr_url: str | None = None
         self.weixin_login_requested = False
         self.weixin_login_in_progress = False
+        self.weixin_login_generation = 0
+        self.weixin_login_process: subprocess.Popen[str] | None = None
         initial_key, initial_model = self._load_existing_openrouter_settings()
         if initial_key:
             self.openrouter_key.set(initial_key)
@@ -255,6 +261,7 @@ class FirstBootApp:
         ]
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._close_app)
         if self.openrouter_prefilled_from_config:
             self.root.after(150, lambda: self._show_step(self.openrouter_step_index))
         self.root.deiconify()
@@ -1083,21 +1090,26 @@ class FirstBootApp:
 
         tk.Label(
             wechat_info,
-            text="1. 点击左侧按钮获取二维码\n"
-                 "2. 使用你的微信（手机）扫描二维码\n"
-                 "3. 扫码后，机器人将只与你一人联系",
+            text="1. 请使用你的微信（手机扫描左侧的二维码）\n"
+                 "2. 后续你还可以添加更多的微信号，跟机器人绑定\n"
+                 "3. 二维码有效期较短，请尽快扫描。如过期请点下方的按钮刷新",
             font=("Noto Sans CJK SC", 11),
             bg="#f8f9fa",
             fg="#555555",
             justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(0, 10))
+        ).pack(anchor=tk.W, pady=(0, 14))
 
-        tk.Label(
+        tk.Button(
             wechat_info,
-            text="提示：二维码有效期较短，请尽快扫描",
-            font=("Noto Sans CJK SC", 10),
-            bg="#f8f9fa",
-            fg="#07c160",
+            text="刷新二维码",
+            command=self._do_weixin_login,
+            bg="#07c160",
+            fg="#ffffff",
+            font=("Noto Sans CJK SC", 10, "bold"),
+            relief=tk.FLAT,
+            padx=16,
+            pady=6,
+            cursor="hand2",
         ).pack(anchor=tk.W)
 
         # Set initial state
@@ -1123,9 +1135,88 @@ class FirstBootApp:
                     except tk.TclError:
                         pass
 
+    def _close_app(self) -> None:
+        self._stop_weixin_login_process()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def _build_command_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update({key: value for key, value in self.env.items() if value})
+        env.setdefault("HOME", str(Path.home()))
+        env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
+        env["OPENCLAW_WORKSPACE"] = str(self.workspace_dir)
+        env["TERM"] = env.get("TERM") or "xterm-256color"
+        return env
+
+    def _resolve_openclaw_binary(self) -> str:
+        if OPENCLAW_WRAPPER.exists():
+            return str(OPENCLAW_WRAPPER)
+        return "openclaw"
+
+    def _render_shell_token(self, token: str) -> str:
+        if SHELL_ENV_ASSIGNMENT_RE.match(token):
+            key, value = token.split("=", 1)
+            return f"{key}={shell_quote(value)}"
+        return shell_quote(token)
+
+    def _rewrite_openclaw_command(self, command: str) -> str:
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return command
+
+        for index, token in enumerate(tokens):
+            if SHELL_ENV_ASSIGNMENT_RE.match(token):
+                continue
+            if token == "openclaw":
+                tokens[index] = self._resolve_openclaw_binary()
+                return " ".join(self._render_shell_token(part) for part in tokens)
+            break
+        return command
+
+    def _build_weixin_login_command(self) -> str:
+        login_command = " ".join(
+            shell_quote(part)
+            for part in [
+                self._resolve_openclaw_binary(),
+                "channels",
+                "login",
+                "--channel",
+                self.weixin_channel,
+            ]
+        )
+        return f"script -qefc {shell_quote(login_command)} /dev/null"
+
+    def _looks_like_qr_ascii_line(self, line: str) -> bool:
+        stripped = line.strip()
+        return bool(stripped) and len(stripped) >= 20 and all(ch in " ▄▀█" for ch in stripped)
+
+    def _strip_ansi(self, text: str) -> str:
+        return ANSI_ESCAPE_RE.sub("", text).replace("\r", "")
+
+    def _stop_weixin_login_process(self, reason: str | None = None) -> None:
+        process = self.weixin_login_process
+        self.weixin_login_process = None
+        if process is None or process.poll() is not None:
+            return
+        if reason:
+            self.append_log(f">>> {reason}")
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
     def _show_weixin_login_button(self) -> None:
         """Show the initial login button for WeChat."""
-        # Clear frame
+        if not self._widget_exists(getattr(self, "weixin_qr_frame", None)):
+            return
         for widget in self.weixin_qr_frame.winfo_children():
             widget.destroy()
 
@@ -1156,36 +1247,123 @@ class FirstBootApp:
         if self.weixin_login_in_progress:
             return
         if self.preview:
-            # Preview mode: show mock QR
             self.weixin_login_requested = True
             self.weixin_qr_url = "https://weixin.qq.com/mock-qr-for-preview"
             self._show_weixin_qr_in_frame("https://weixin.qq.com/mock-qr-for-preview")
             return
+        self._stop_weixin_login_process("正在重新获取微信二维码，已停止上一轮登录会话。")
         self.weixin_login_in_progress = True
+        self.weixin_login_requested = False
+        self.weixin_qr_url = None
+        self.weixin_login_generation += 1
+        login_token = self.weixin_login_generation
         self._show_weixin_login_loading()
-        threading.Thread(target=self._fetch_weixin_qr_worker, daemon=True).start()
+        threading.Thread(target=self._fetch_weixin_qr_worker, args=(login_token,), daemon=True).start()
 
-    def _fetch_weixin_qr_worker(self) -> None:
-        qr_url = self._fetch_weixin_qr_url()
-        self.root.after(0, lambda: self._handle_weixin_qr_result(qr_url))
+    def _fetch_weixin_qr_worker(self, login_token: int) -> None:
+        command = self._build_weixin_login_command()
+        env = self._build_command_env()
+        self.root.after(0, lambda: self.append_log(">>> 正在获取微信登录二维码..."))
+        self.root.after(0, lambda cmd=command: self.append_log(f"$ {cmd}"))
 
-    def _handle_weixin_qr_result(self, qr_url: str | None) -> None:
-        self.weixin_login_in_progress = False
-        if qr_url:
-            self.weixin_login_requested = True
-            self.weixin_qr_url = qr_url
-            self.append_log(f">>> 获取到二维码 URL: {qr_url[:50]}...")
-            self._show_weixin_qr_in_frame(qr_url)
+        try:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                env=env,
+            )
+        except Exception as exc:
+            self.root.after(0, lambda error=str(exc): self._handle_weixin_qr_failure(login_token, error))
             return
-        self.append_log("WARN: 未能获取二维码，请检查命令输出")
+
+        self.weixin_login_process = process
+        deadline = time.monotonic() + 20
+        qr_url: str | None = None
+        collected_lines: list[str] = []
+
+        try:
+            stream = process.stdout
+            if stream is None:
+                raise RuntimeError("无法读取 openclaw 登录命令输出。")
+            while True:
+                if login_token != self.weixin_login_generation:
+                    self._stop_weixin_login_process()
+                    return
+                line = stream.readline()
+                if line:
+                    clean_line = self._strip_ansi(line).strip()
+                    if not clean_line:
+                        continue
+                    collected_lines.append(clean_line)
+                    if not self._looks_like_qr_ascii_line(clean_line):
+                        self.root.after(0, lambda line=clean_line: self.append_log(f"    {line}"))
+                    if qr_url is None:
+                        qr_url = self._extract_qr_url("\n".join(collected_lines[-20:]))
+                        if qr_url:
+                            self.root.after(
+                                0,
+                                lambda url=qr_url, token=login_token: self._handle_weixin_qr_result(token, url),
+                            )
+                    continue
+                if process.poll() is not None:
+                    break
+                if qr_url is None and time.monotonic() >= deadline:
+                    self._stop_weixin_login_process()
+                    self.root.after(
+                        0,
+                        lambda: self._handle_weixin_qr_failure(
+                            login_token,
+                            "等待 20 秒仍未检测到二维码链接，请检查 openclaw 输出。",
+                        ),
+                    )
+                    return
+                time.sleep(0.05)
+        except Exception as exc:
+            error_message = f"读取微信登录输出失败: {exc}"
+            self.root.after(0, lambda msg=error_message: self._handle_weixin_qr_failure(login_token, msg))
+            return
+        finally:
+            if self.weixin_login_process is process and process.poll() is not None:
+                self.weixin_login_process = None
+
+        if login_token != self.weixin_login_generation:
+            return
+        if qr_url is None:
+            summary = "\n".join(collected_lines[-12:])
+            error_message = "未能从命令输出中提取二维码链接。"
+            if summary:
+                error_message = f"{error_message}\n最近输出:\n{summary}"
+            self.root.after(0, lambda msg=error_message: self._handle_weixin_qr_failure(login_token, msg))
+            return
+        return_code = process.returncode or 0
+        if return_code not in (0, 124):
+            self.root.after(0, lambda code=return_code: self.append_log(f"WARN: 微信登录命令已退出，退出码 {code}"))
+
+    def _handle_weixin_qr_result(self, login_token: int, qr_url: str) -> None:
+        if login_token != self.weixin_login_generation:
+            return
+        self.weixin_login_in_progress = False
+        self.weixin_login_requested = True
+        self.weixin_qr_url = qr_url
+        self.append_log(f">>> 获取到二维码 URL: {qr_url[:80]}")
+        self._show_weixin_qr_in_frame(qr_url)
+
+    def _handle_weixin_qr_failure(self, login_token: int, error_message: str) -> None:
+        if login_token != self.weixin_login_generation:
+            return
+        self.weixin_login_in_progress = False
+        self.append_log(f"WARN: {error_message}")
         self._show_weixin_login_button()
-        messagebox.showerror(
-            "获取二维码失败",
-            "未能从命令输出中获取二维码。\n"
-            "请确保 openclaw channels login 命令正常工作。",
-        )
+        if self.current_step == self.channel_step_index:
+            messagebox.showerror("获取二维码失败", error_message)
 
     def _show_weixin_login_loading(self) -> None:
+        if not self._widget_exists(getattr(self, "weixin_qr_frame", None)):
+            return
         for widget in self.weixin_qr_frame.winfo_children():
             widget.destroy()
         tk.Label(
@@ -1199,7 +1377,7 @@ class FirstBootApp:
         ).pack(pady=(20, 10))
         tk.Label(
             self.weixin_qr_frame,
-            text="请稍候，拿到二维码后会自动显示在这里",
+            text="检测到二维码后会立刻显示，不会等待扫码完成",
             font=("Noto Sans CJK SC", 10),
             bg="#f8f9fa",
             fg="#888888",
@@ -1209,11 +1387,11 @@ class FirstBootApp:
 
     def _show_weixin_qr_in_frame(self, qr_url: str) -> None:
         """Display QR code in the WeChat section frame."""
-        # Clear frame
+        if not self._widget_exists(getattr(self, "weixin_qr_frame", None)):
+            return
         for widget in self.weixin_qr_frame.winfo_children():
             widget.destroy()
 
-        # Generate and display QR code
         if qrcode is not None and Image is not None and ImageTk is not None:
             try:
                 qr = qrcode.QRCode(
@@ -1240,7 +1418,6 @@ class FirstBootApp:
                     bg="#f8f9fa",
                 ).pack(pady=(20, 0))
         else:
-            # Fallback: show URL as text
             text_widget = tk.Text(
                 self.weixin_qr_frame,
                 height=4,
@@ -1252,20 +1429,6 @@ class FirstBootApp:
             text_widget.configure(state=tk.DISABLED)
             text_widget.pack(pady=(20, 5))
 
-        # Add refresh button
-        refresh_btn = tk.Button(
-            self.weixin_qr_frame,
-            text="重新获取二维码",
-            command=self._do_weixin_login,
-            bg="#07c160",
-            fg="#ffffff",
-            font=("Noto Sans CJK SC", 10),
-            relief=tk.FLAT,
-            padx=15,
-            pady=5,
-            cursor="hand2",
-        )
-        refresh_btn.pack(pady=(5, 0))
 
     def _build_qq_section(self, container):
         """Build QQ section - separated to avoid scope issues."""
@@ -1443,6 +1606,28 @@ class FirstBootApp:
         frame.rowconfigure(2, weight=1)
         frame.columnconfigure(0, weight=1)
 
+    def _approve_request_with_fallback(self, request_id: str) -> bool:
+        mode = self.pending_mode if hasattr(self, "pending_mode") else "nodes"
+        result = self.run_command(
+            f"审批配对请求 ({mode})",
+            f"openclaw {mode} approve {shell_quote(request_id)}",
+            allow_failure=True,
+        )
+        if result.returncode == 0:
+            self.pending_mode = mode
+            return True
+
+        fallback_mode = "devices" if mode == "nodes" else "nodes"
+        fallback_result = self.run_command(
+            f"审批配对请求 ({fallback_mode})",
+            f"openclaw {fallback_mode} approve {shell_quote(request_id)}",
+            allow_failure=True,
+        )
+        if fallback_result.returncode == 0:
+            self.pending_mode = fallback_mode
+            return True
+        return False
+
     def approve_selected_request(self) -> None:
         """Approve the selected pairing request."""
         request_id = self.request_id.get().strip()
@@ -1459,40 +1644,19 @@ class FirstBootApp:
             )
             return
 
-        # Determine mode based on pending_requests or try both
-        mode = self.pending_mode if hasattr(self, 'pending_mode') else "nodes"
-        
-        # Try to approve
-        result = self.run_command(
-            f"审批配对请求 ({mode})",
-            f"openclaw {mode} approve {shell_quote(request_id)}",
-            allow_failure=True,
-        )
-
-        if result.returncode == 0:
+        if self._approve_request_with_fallback(request_id):
             messagebox.showinfo("成功", f"Request ID {request_id} 已审批通过！")
             self.append_pairing_output(f"\n✓ 已审批: {request_id}")
-        else:
-            # Try alternative mode
-            fallback_mode = "devices" if mode == "nodes" else "nodes"
-            fallback_result = self.run_command(
-                f"审批配对请求 ({fallback_mode})",
-                f"openclaw {fallback_mode} approve {shell_quote(request_id)}",
-                allow_failure=True,
-            )
-            if fallback_result.returncode == 0:
-                messagebox.showinfo("成功", f"Request ID {request_id} 已审批通过！")
-                self.append_pairing_output(f"\n✓ 已审批: {request_id}")
-                self.pending_mode = fallback_mode
-            else:
-                messagebox.showerror(
-                    "审批失败",
-                    f"无法审批 Request ID: {request_id}\n\n"
-                    "请确认:\n"
-                    "1. Request ID 是否正确\n"
-                    "2. 是否已在手机端发起绑定请求\n"
-                    "3. openclaw 服务是否正常运行"
-                )
+            return
+
+        messagebox.showerror(
+            "审批失败",
+            f"无法审批 Request ID: {request_id}\n\n"
+            "请确认:\n"
+            "1. Request ID 是否正确\n"
+            "2. 是否已在手机端发起绑定请求\n"
+            "3. openclaw 服务是否正常运行"
+        )
 
     def _build_execute_step(self, parent):
         tk.Frame(parent, height=10).pack()
@@ -2075,21 +2239,25 @@ class FirstBootApp:
         *,
         allow_failure: bool = False,
         timeout: int = 300,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        effective_command = self._rewrite_openclaw_command(command)
+        effective_env = env or self._build_command_env()
         self.append_log(f">>> {title}")
-        self.append_log(f"$ {command}")
+        self.append_log(f"$ {effective_command}")
 
         if self.preview:
             self.append_log(f"[PREVIEW] 模拟执行 {title} 跳过实际调用")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(effective_command, 0, stdout="", stderr="")
 
         try:
             process = subprocess.run(
-                command,
+                effective_command,
                 shell=True,
                 text=True,
                 capture_output=True,
                 timeout=timeout,
+                env=effective_env,
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout or ""
@@ -2099,7 +2267,7 @@ class FirstBootApp:
             if isinstance(stderr, bytes):
                 stderr = stderr.decode("utf-8", errors="replace")
             self.append_log(f"WARN: {title} 超时（{timeout}s），将使用已输出内容继续处理")
-            process = subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
+            process = subprocess.CompletedProcess(effective_command, 124, stdout=stdout, stderr=stderr)
 
         if process.stdout.strip():
             for line in process.stdout.strip().splitlines()[:40]:
@@ -2324,20 +2492,8 @@ class FirstBootApp:
             self.append_log(f"[PREVIEW] 审批请求 ID: {request_id}")
             return
 
-        command = f"openclaw {self.pending_mode} approve {shell_quote(request_id)}"
-        result = self.run_command("审批配对请求", command, allow_failure=True)
-        if result.returncode == 0:
-            return
-
-        fallback_mode = "devices" if self.pending_mode == "nodes" else "nodes"
-        fallback = self.run_command(
-            f"使用 {fallback_mode} 再次审批配对请求",
-            f"openclaw {fallback_mode} approve {shell_quote(request_id)}",
-            allow_failure=True,
-        )
-        if fallback.returncode != 0:
+        if not self._approve_request_with_fallback(request_id):
             raise RuntimeError("审批配对请求失败，请确认 request id 是否正确。")
-        self.pending_mode = fallback_mode
 
     def send_welcome(self) -> bool:
         """Send welcome message to connected channels.
@@ -2464,7 +2620,7 @@ class FirstBootApp:
                 "初始化完成" + (" (预览模式)" if self.preview else ""),
                 "QuantideClaw 初始化已完成。后续会自动拉起 gateway 与 Edge-TTS 代理。",
             )
-            self.root.destroy()
+            self._close_app()
         finally:
             if hasattr(self, "start_button") and self.start_button.winfo_exists():
                 try:
