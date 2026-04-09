@@ -234,6 +234,9 @@ class FirstBootApp:
         self.model_worker_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
         self.pending_mode = "nodes"
         self.pending_requests: list[dict[str, str]] = []
+        self.paired_devices: list[dict[str, str]] = []
+        self.pairing_status = tk.StringVar(value="请点击下方按钮刷新配对状态。")
+        self.pairing_runtime_signature: str | None = None
         self.images: dict[str, object] = {}
         self.openrouter_step_index = 2
         self.channel_step_index = 3
@@ -1569,42 +1572,196 @@ class FirstBootApp:
 
         tk.Label(
             frame,
-            text="请点击「刷新」以获取最新配对请求",
-            wraplength=700,
+            text="点击「刷新配对请求」后，向导会先同步当前渠道配置并启动 gateway，再查询最新的待审批请求。待审批设备会以表格方式显示，可逐条审批。",
+            wraplength=760,
             justify=tk.LEFT,
             bg="#ffffff",
             relief=tk.FLAT,
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 15))
+        ).grid(row=0, column=0, sticky="w", pady=(0, 15))
 
-        # Top frame with refresh button, Request ID input, and Approve button
         top_frame = tk.Frame(frame, bg="#ffffff")
-        top_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        top_frame.grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
-        ttk.Button(top_frame, text="刷新设备列表", command=self.refresh_pairings).pack(side=tk.LEFT, padx=(0, 15))
-        tk.Label(top_frame, text="Request ID:", bg="#ffffff", relief=tk.FLAT).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Entry(top_frame, textvariable=self.request_id, width=40).pack(side=tk.LEFT, padx=(0, 15))
-        
-        # Add Approve button
-        approve_btn = tk.Button(
+        ttk.Button(top_frame, text="刷新配对请求", command=self.refresh_pairings).pack(side=tk.LEFT)
+        tk.Label(
             top_frame,
-            text="审批通过",
-            command=self.approve_selected_request,
-            bg="#07c160",
-            fg="#ffffff",
-            font=("Noto Sans CJK SC", 10, "bold"),
-            relief=tk.FLAT,
-            padx=15,
-            pady=4,
-            cursor="hand2",
-        )
-        approve_btn.pack(side=tk.LEFT)
+            textvariable=self.pairing_status,
+            font=("Noto Sans CJK SC", 10),
+            bg="#ffffff",
+            fg="#666666",
+            justify=tk.LEFT,
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
-        self.pairing_output = scrolledtext.ScrolledText(frame, height=12, font=("Monospace", 10))
-        self.pairing_output.grid(row=2, column=0, columnspan=4, sticky="nsew")
+        pending_card = ttk.LabelFrame(frame, text="待审批请求", padding=12)
+        pending_card.grid(row=2, column=0, sticky="nsew")
+        self.pending_table_container = tk.Frame(pending_card, bg="#ffffff")
+        self.pending_table_container.pack(fill=tk.BOTH, expand=True)
+
+        paired_card = ttk.LabelFrame(frame, text="已配对设备（参考）", padding=12)
+        paired_card.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        tk.Label(
+            paired_card,
+            text="下方仅展示当前已配对设备供参考；其中 `cli / linux` 通常是这台机器自身的 operator 设备，不代表新的待审批请求。",
+            wraplength=760,
+            justify=tk.LEFT,
+            bg="#ffffff",
+            fg="#666666",
+            relief=tk.FLAT,
+        ).pack(anchor=tk.W, pady=(0, 8))
+        self.paired_table_container = tk.Frame(paired_card, bg="#ffffff")
+        self.paired_table_container.pack(fill=tk.BOTH, expand=True)
+
+        diagnostics_card = ttk.LabelFrame(frame, text="命令输出与诊断", padding=10)
+        diagnostics_card.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        self.pairing_output = scrolledtext.ScrolledText(diagnostics_card, height=8, font=("Monospace", 10))
+        self.pairing_output.pack(fill=tk.BOTH, expand=True)
         self.pairing_output.configure(state=tk.DISABLED)
 
-        frame.rowconfigure(2, weight=1)
+        frame.rowconfigure(2, weight=3)
+        frame.rowconfigure(3, weight=2)
+        frame.rowconfigure(4, weight=1)
         frame.columnconfigure(0, weight=1)
+
+        self._render_pairing_tables()
+
+    def _clear_pairing_table(self, container: tk.Misc) -> None:
+        for widget in container.winfo_children():
+            widget.destroy()
+
+    def _render_pairing_tables(self) -> None:
+        self._render_pending_request_table()
+        self._render_paired_device_table()
+
+    def _render_pending_request_table(self) -> None:
+        container = getattr(self, "pending_table_container", None)
+        if not self._widget_exists(container):
+            return
+        self._clear_pairing_table(container)
+
+        if not self.pending_requests:
+            tk.Label(
+                container,
+                text="当前没有待审批请求。若你刚完成扫码或手机端刚发起绑定，请点击上方“刷新配对请求”。",
+                font=("Noto Sans CJK SC", 10),
+                bg="#ffffff",
+                fg="#666666",
+                justify=tk.LEFT,
+                wraplength=720,
+            ).pack(anchor=tk.W)
+            return
+
+        headers = ["请求 ID", "来源", "平台 / 客户端", "角色 / 权限", "创建时间", "操作"]
+        for column, header in enumerate(headers):
+            tk.Label(
+                container,
+                text=header,
+                font=("Noto Sans CJK SC", 10, "bold"),
+                bg="#e9f5ee",
+                fg="#1f1f1f",
+                padx=8,
+                pady=8,
+                anchor=tk.W,
+                relief=tk.GROOVE,
+            ).grid(row=0, column=column, sticky="nsew")
+
+        column_weights = [3, 1, 2, 4, 2, 1]
+        for column, weight in enumerate(column_weights):
+            container.grid_columnconfigure(column, weight=weight)
+
+        for row_index, item in enumerate(self.pending_requests, start=1):
+            row_bg = "#ffffff" if row_index % 2 else "#f7fbff"
+            values = [
+                item.get("id", "-"),
+                item.get("source", "待审批"),
+                item.get("platform", "-"),
+                item.get("roles", "-"),
+                item.get("created_at", "-"),
+            ]
+            wrap_lengths = [220, 120, 160, 320, 140]
+            for column, value in enumerate(values):
+                tk.Label(
+                    container,
+                    text=value or "-",
+                    font=("Noto Sans CJK SC", 10),
+                    bg=row_bg,
+                    fg="#333333",
+                    justify=tk.LEFT,
+                    anchor=tk.W,
+                    wraplength=wrap_lengths[column],
+                    padx=8,
+                    pady=8,
+                    relief=tk.GROOVE,
+                ).grid(row=row_index, column=column, sticky="nsew")
+
+            tk.Button(
+                container,
+                text="审批",
+                command=lambda request_id=item.get("id", ""): self._approve_request_from_table(request_id),
+                bg="#07c160",
+                fg="#ffffff",
+                font=("Noto Sans CJK SC", 10, "bold"),
+                relief=tk.FLAT,
+                padx=12,
+                pady=5,
+                cursor="hand2",
+            ).grid(row=row_index, column=5, padx=8, pady=8, sticky="nsew")
+
+    def _render_paired_device_table(self) -> None:
+        container = getattr(self, "paired_table_container", None)
+        if not self._widget_exists(container):
+            return
+        self._clear_pairing_table(container)
+
+        if not self.paired_devices:
+            tk.Label(
+                container,
+                text="当前没有已配对设备。",
+                font=("Noto Sans CJK SC", 10),
+                bg="#ffffff",
+                fg="#666666",
+            ).pack(anchor=tk.W)
+            return
+
+        headers = ["设备 ID", "平台 / 客户端", "角色 / 权限", "配对时间"]
+        for column, header in enumerate(headers):
+            tk.Label(
+                container,
+                text=header,
+                font=("Noto Sans CJK SC", 10, "bold"),
+                bg="#eef3f8",
+                fg="#1f1f1f",
+                padx=8,
+                pady=8,
+                anchor=tk.W,
+                relief=tk.GROOVE,
+            ).grid(row=0, column=column, sticky="nsew")
+
+        for column, weight in enumerate((3, 2, 4, 2)):
+            container.grid_columnconfigure(column, weight=weight)
+
+        for row_index, item in enumerate(self.paired_devices, start=1):
+            row_bg = "#ffffff" if row_index % 2 else "#f7fbff"
+            values = [
+                item.get("id", "-"),
+                item.get("platform", "-"),
+                item.get("roles", "-"),
+                item.get("created_at", "-"),
+            ]
+            wrap_lengths = [220, 180, 320, 140]
+            for column, value in enumerate(values):
+                tk.Label(
+                    container,
+                    text=value or "-",
+                    font=("Noto Sans CJK SC", 10),
+                    bg=row_bg,
+                    fg="#333333",
+                    justify=tk.LEFT,
+                    anchor=tk.W,
+                    wraplength=wrap_lengths[column],
+                    padx=8,
+                    pady=8,
+                    relief=tk.GROOVE,
+                ).grid(row=row_index, column=column, sticky="nsew")
 
     def _approve_request_with_fallback(self, request_id: str) -> bool:
         mode = self.pending_mode if hasattr(self, "pending_mode") else "nodes"
@@ -1628,11 +1785,9 @@ class FirstBootApp:
             return True
         return False
 
-    def approve_selected_request(self) -> None:
-        """Approve the selected pairing request."""
-        request_id = self.request_id.get().strip()
+    def _approve_request_from_table(self, request_id: str) -> None:
         if not request_id:
-            messagebox.showerror("错误", "请先输入或选择 Request ID")
+            messagebox.showerror("错误", "无效的请求 ID，无法审批。")
             return
 
         if self.preview:
@@ -1645,16 +1800,17 @@ class FirstBootApp:
             return
 
         if self._approve_request_with_fallback(request_id):
-            messagebox.showinfo("成功", f"Request ID {request_id} 已审批通过！")
-            self.append_pairing_output(f"\n✓ 已审批: {request_id}")
+            self.append_log(f">>> 已审批请求: {request_id}")
+            messagebox.showinfo("成功", f"请求 {request_id} 已审批通过。")
+            self.refresh_pairings(prepare_runtime=False)
             return
 
         messagebox.showerror(
             "审批失败",
-            f"无法审批 Request ID: {request_id}\n\n"
+            f"无法审批请求: {request_id}\n\n"
             "请确认:\n"
-            "1. Request ID 是否正确\n"
-            "2. 是否已在手机端发起绑定请求\n"
+            "1. 该请求仍处于待审批状态\n"
+            "2. 绑定请求已在手机端发起\n"
             "3. openclaw 服务是否正常运行"
         )
 
@@ -2389,77 +2545,234 @@ class FirstBootApp:
             encoding="utf-8",
         )
 
-    def refresh_pairings(self) -> None:
+    def _pairing_runtime_state_signature(self) -> str:
+        return json.dumps(
+            {
+                "agent_name": self.agent_name.get().strip(),
+                "user_name": self.user_name.get().strip(),
+                "model_id": self.model_id.get().strip(),
+                "install_weixin": self.install_weixin.get(),
+                "install_qqbot": self.install_qqbot.get(),
+                "qq_app_id": self.qq_app_id.get().strip(),
+                "qq_app_secret": self.qq_app_secret.get().strip(),
+                "openrouter_key": self.openrouter_key.get().strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def _ensure_pairing_runtime_ready(self) -> None:
         if self.preview:
-            self.append_log("[PREVIEW] 跳过刷新设备调用")
-            self.request_id.set("preview-dummy-request-id-123456")
-            self.append_pairing_output("模拟的待审批设备日志输出：\n\n- preview-dummy-request-id-123456")
-            self.pending_requests = [{"id": "preview-dummy", "summary": "mock"}]
+            self.pairing_runtime_signature = "preview"
             return
 
-        output = []
-        pending_requests: list[dict[str, str]] = []
-        mode = "nodes"
+        signature = self._pairing_runtime_state_signature()
+        if self.pairing_runtime_signature == signature:
+            return
 
-        for candidate_mode, command in (
-            ("nodes", "openclaw nodes pending --json"),
-            ("devices", "openclaw devices list --json"),
-        ):
-            result = self.run_command(
-                f"查询待审批设备 ({candidate_mode})",
-                command,
+        agent_name = self.agent_name.get().strip()
+        user_name = self.user_name.get().strip()
+        model_id = self.model_id.get().strip()
+        openrouter_key = self.openrouter_key.get().strip()
+
+        self.append_log(">>> 先同步当前配置并准备配对运行环境")
+        self.write_workspace_files(user_name, agent_name)
+        self.append_log(">>> 已同步 USER.md 和 IDENTITY.md")
+        self.write_config(user_name, agent_name, model_id, openrouter_key)
+        self.append_log(f">>> 已同步配置文件: {self.config_path}")
+        self._apply_model_with_openclaw(model_id)
+
+        self.run_command(
+            "启动本地 gateway 和 Edge-TTS 代理",
+            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
+        )
+        self.wait_for_gateway()
+
+        if self.install_qqbot.get():
+            token = f"{self.qq_app_id.get().strip()}:{self.qq_app_secret.get().strip()}"
+            qq_result = self.run_command(
+                "配置 QQ Bot 渠道",
+                f"openclaw channels add --channel {shell_quote(self.qq_channel)} --token {shell_quote(token)}",
                 allow_failure=True,
             )
-            if result.returncode != 0 or not result.stdout.strip():
-                continue
-            try:
-                payload = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                continue
+            if qq_result.returncode != 0:
+                qq_error = (qq_result.stderr or qq_result.stdout or "").strip()
+                qq_error_lower = qq_error.lower()
+                if qq_error and any(word in qq_error_lower for word in ("already", "exists", "duplicate")):
+                    self.append_log(">>> QQ Bot 渠道已存在，继续沿用现有配置")
+                elif "已存在" in qq_error:
+                    self.append_log(">>> QQ Bot 渠道已存在，继续沿用现有配置")
+                else:
+                    raise RuntimeError(qq_error or "配置 QQ Bot 渠道失败。")
 
-            pending_requests = self._normalize_request_payload(payload)
+        if self.install_weixin.get():
+            self.append_log(">>> 微信扫码状态沿用渠道接入页当前结果")
+
+        self.run_command(
+            "重启 gateway 以加载最新配置",
+            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
+        )
+        self.wait_for_gateway()
+        self.pairing_runtime_signature = signature
+
+    def _format_pairing_time(self, value: object) -> str:
+        timestamp = parse_number(value)
+        if timestamp is None:
+            return "-"
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000
+        try:
+            return dt.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, ValueError):
+            return str(value)
+
+    def _stringify_pairing_value(self, value: object) -> str:
+        if isinstance(value, list):
+            parts = [str(item).strip() for item in value if str(item).strip()]
+            return ", ".join(parts)
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _build_pairing_platform_text(self, item: dict[str, object]) -> str:
+        parts = [
+            self._stringify_pairing_value(item.get("platform")),
+            self._stringify_pairing_value(item.get("clientMode") or item.get("clientId")),
+        ]
+        return " / ".join(part for part in parts if part) or "-"
+
+    def refresh_pairings(self, prepare_runtime: bool = True) -> None:
+        if self.preview:
+            self.append_log("[PREVIEW] 跳过刷新设备调用")
+            self.pending_mode = "nodes"
+            self.pending_requests = [
+                {
+                    "id": "preview-dummy-request-id-123456",
+                    "source": "nodes pending",
+                    "platform": "android / weixin",
+                    "roles": "operator；operator.admin, operator.pairing",
+                    "created_at": "预览模式",
+                    "summary": "模拟的配对请求",
+                }
+            ]
+            self.paired_devices = [
+                {
+                    "id": "preview-local-operator-device",
+                    "platform": "linux / cli",
+                    "roles": "operator；operator.admin, operator.pairing",
+                    "created_at": "预览模式",
+                    "summary": "模拟的已配对设备",
+                }
+            ]
+            self.pairing_status.set("预览模式：显示 1 个待审批请求。")
+            self.append_pairing_output("模拟诊断输出：\n- nodes pending --json -> 1 item\n- devices list --json -> pending=1, paired=1")
+            self._render_pairing_tables()
+            return
+
+        self.pairing_status.set("正在刷新配对状态...")
+        self.root.update_idletasks()
+        if prepare_runtime:
+            self._ensure_pairing_runtime_ready()
+
+        diagnostics: list[str] = []
+        pending_requests: list[dict[str, str]] = []
+        paired_devices: list[dict[str, str]] = []
+        mode = "nodes"
+
+        devices_json = self.run_command(
+            "查询设备列表 JSON",
+            "openclaw devices list --json",
+            allow_failure=True,
+        )
+        devices_payload: object | None = None
+        devices_stdout = devices_json.stdout.strip()
+        if devices_json.returncode == 0 and devices_stdout:
+            diagnostics.append("devices list --json:\n" + devices_stdout)
+            try:
+                devices_payload = json.loads(devices_stdout)
+            except json.JSONDecodeError:
+                self.append_log("WARN: devices list --json 输出不是合法 JSON，已退回诊断文本展示")
+        elif devices_json.stderr.strip():
+            diagnostics.append("devices list --json stderr:\n" + devices_json.stderr.strip())
+
+        if isinstance(devices_payload, dict):
+            pending_requests = self._normalize_request_payload(
+                devices_payload.get("pending", []),
+                source_label="devices pending",
+            )
+            paired_devices = self._normalize_paired_payload(devices_payload.get("paired", []))
             if pending_requests:
-                mode = candidate_mode
-                break
+                mode = "devices"
+
+        nodes_json = self.run_command(
+            "查询待审批请求 JSON",
+            "openclaw nodes pending --json",
+            allow_failure=True,
+        )
+        nodes_stdout = nodes_json.stdout.strip()
+        if nodes_json.returncode == 0 and nodes_stdout:
+            diagnostics.append("nodes pending --json:\n" + nodes_stdout)
+            try:
+                nodes_payload = json.loads(nodes_stdout)
+            except json.JSONDecodeError:
+                self.append_log("WARN: nodes pending --json 输出不是合法 JSON，已退回诊断文本展示")
+            else:
+                node_requests = self._normalize_request_payload(nodes_payload, source_label="nodes pending")
+                if node_requests:
+                    pending_requests = node_requests
+                    mode = "nodes"
+        elif nodes_json.stderr.strip():
+            diagnostics.append("nodes pending --json stderr:\n" + nodes_json.stderr.strip())
 
         if not pending_requests:
-            for candidate_mode, command in (
-                ("nodes", "openclaw nodes pending"),
-                ("devices", "openclaw devices list"),
-            ):
-                result = self.run_command(
-                    f"查询待审批设备文本输出 ({candidate_mode})",
-                    command,
-                    allow_failure=True,
-                )
-                if result.returncode != 0:
-                    continue
-                raw = result.stdout.strip() or result.stderr.strip()
-                if not raw:
-                    continue
-                output.append(raw)
-                request_ids = REQUEST_ID_RE.findall(raw)
-                pending_requests = [{"id": item, "summary": raw} for item in request_ids]
-                if pending_requests:
-                    mode = candidate_mode
-                    break
+            nodes_text = self.run_command(
+                "查询待审批请求文本输出",
+                "openclaw nodes pending",
+                allow_failure=True,
+            )
+            nodes_raw = nodes_text.stdout.strip() or nodes_text.stderr.strip()
+            if nodes_raw:
+                diagnostics.append("nodes pending:\n" + nodes_raw)
+                request_ids = REQUEST_ID_RE.findall(nodes_raw)
+                if request_ids:
+                    pending_requests = [
+                        {
+                            "id": item,
+                            "source": "nodes pending",
+                            "platform": "-",
+                            "roles": "待解析",
+                            "created_at": "-",
+                            "summary": nodes_raw,
+                        }
+                        for item in request_ids
+                    ]
+                    mode = "nodes"
 
         self.pending_mode = mode
         self.pending_requests = pending_requests
+        self.paired_devices = paired_devices
+        self.request_id.set(pending_requests[0]["id"] if len(pending_requests) == 1 else "")
 
         if pending_requests:
-            text = "\n\n".join(item["summary"] for item in pending_requests)
-            self.append_pairing_output(text)
-            if len(pending_requests) == 1:
-                self.request_id.set(pending_requests[0]["id"])
+            self.pairing_status.set(
+                f"找到 {len(pending_requests)} 个待审批请求；已配对设备 {len(paired_devices)} 台。"
+            )
             self.append_log(f">>> 找到 {len(pending_requests)} 个待审批请求，模式={mode}")
-            return
+        elif paired_devices:
+            self.pairing_status.set(
+                f"当前没有待审批请求；已配对设备 {len(paired_devices)} 台。"
+            )
+            self.append_log(
+                ">>> 当前没有待审批请求；下方已配对设备通常包含本机自身的 cli/operator 设备。"
+            )
+        else:
+            self.pairing_status.set("当前没有待审批请求，也没有已配对设备。")
+            self.append_log(">>> 当前未检测到可审批 request id，请先在手机端发起绑定，再点一次刷新")
 
-        fallback = "\n\n".join(output) if output else "未查询到待审批设备。"
-        self.append_pairing_output(fallback)
-        self.append_log(">>> 当前未检测到可审批 request id，请先在手机端发起绑定，再点一次刷新")
+        self._render_pairing_tables()
+        self.append_pairing_output("\n\n".join(diagnostics) if diagnostics else "暂无额外诊断输出。")
 
-    def _normalize_request_payload(self, payload: object) -> list[dict[str, str]]:
+    def _normalize_request_payload(self, payload: object, *, source_label: str) -> list[dict[str, str]]:
         items: list[object] = []
         if isinstance(payload, list):
             items = payload
@@ -2469,19 +2782,64 @@ class FirstBootApp:
                 if isinstance(value, list):
                     items = value
                     break
-            if not items and any(key in payload for key in ("requestId", "id")):
+            if not items and any(
+                key in payload
+                for key in (
+                    "requestId",
+                    "request_id",
+                    "id",
+                    "deviceId",
+                    "device_id",
+                )
+            ):
                 items = [payload]
 
         normalized: list[dict[str, str]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-            request_id = str(item.get("requestId") or item.get("id") or "").strip()
+            request_id = self._stringify_pairing_value(
+                item.get("requestId")
+                or item.get("request_id")
+                or item.get("id")
+                or item.get("deviceId")
+                or item.get("device_id")
+            )
             if not request_id:
                 continue
+            role_text = self._stringify_pairing_value(item.get("roles") or item.get("role"))
+            scopes_text = self._stringify_pairing_value(item.get("scopes"))
             normalized.append(
                 {
                     "id": request_id,
+                    "source": self._stringify_pairing_value(item.get("channel") or item.get("source")) or source_label,
+                    "platform": self._build_pairing_platform_text(item),
+                    "roles": "；".join(part for part in (role_text, scopes_text) if part) or "-",
+                    "created_at": self._format_pairing_time(
+                        item.get("createdAtMs") or item.get("createdAt") or item.get("requestedAtMs") or item.get("requestedAt")
+                    ),
+                    "summary": json.dumps(item, ensure_ascii=False, indent=2),
+                }
+            )
+        return normalized
+
+    def _normalize_paired_payload(self, payload: object) -> list[dict[str, str]]:
+        items = payload if isinstance(payload, list) else []
+        normalized: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            device_id = self._stringify_pairing_value(item.get("deviceId") or item.get("id"))
+            if not device_id:
+                continue
+            role_text = self._stringify_pairing_value(item.get("roles") or item.get("role"))
+            scopes_text = self._stringify_pairing_value(item.get("scopes"))
+            normalized.append(
+                {
+                    "id": device_id,
+                    "platform": self._build_pairing_platform_text(item),
+                    "roles": "；".join(part for part in (role_text, scopes_text) if part) or "-",
+                    "created_at": self._format_pairing_time(item.get("approvedAtMs") or item.get("createdAtMs") or item.get("createdAt")),
                     "summary": json.dumps(item, ensure_ascii=False, indent=2),
                 }
             )
@@ -2592,7 +2950,7 @@ class FirstBootApp:
                 "确认开始初始化？\n\n"
                 "1. 写入 QuantideClaw 本地配置\n"
                 "2. 配置微信或 QQ Bot 渠道\n"
-                "3. 审批设备配对请求\n"
+                "3. 检查设备配对状态（如有待审批请求，请先在上一页审批）\n"
                 "4. 发送欢迎消息\n\n"
                 "只有欢迎消息发送成功后，才会写入完成标记。"
                 + ("\n\n注意：当前处于预览模式，所有操作仅打印日志不实际执行！" if self.preview else ""),
@@ -2629,12 +2987,6 @@ class FirstBootApp:
                     pass
 
     def execute_setup(self) -> None:
-        agent_name = self.agent_name.get().strip()
-        user_name = self.user_name.get().strip()
-        model_id = self.model_id.get().strip()
-        openrouter_key = self.openrouter_key.get().strip()
-        request_id = self.request_id.get().strip()
-
         self.append_log("=" * 64)
         if self.preview:
             self.append_log("开始执行 QuantideClaw 初始化流程 [预览模式]")
@@ -2642,58 +2994,16 @@ class FirstBootApp:
             self.append_log("开始执行 QuantideClaw 初始化流程")
         self.append_log("=" * 64)
 
-        self.write_workspace_files(user_name, agent_name)
-        self.append_log(">>> 已写入 USER.md 和 IDENTITY.md")
-        self.write_config(user_name, agent_name, model_id, openrouter_key)
-        self.append_log(f">>> 已写入配置文件: {self.config_path}")
-        self._apply_model_with_openclaw(model_id)
+        self._ensure_pairing_runtime_ready()
+        self.refresh_pairings(prepare_runtime=False)
 
-        self.run_command(
-            "启动本地 gateway 和 Edge-TTS 代理",
-            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
-        )
-        self.wait_for_gateway()
-
-        if self.install_qqbot.get():
-            token = f"{self.qq_app_id.get().strip()}:{self.qq_app_secret.get().strip()}"
-            self.run_command(
-                "配置 QQ Bot 渠道",
-                f"openclaw channels add --channel {shell_quote(self.qq_channel)} --token {shell_quote(token)}",
+        if self.pending_requests:
+            pending_preview = "，".join(item["id"] for item in self.pending_requests[:3])
+            if len(self.pending_requests) > 3:
+                pending_preview += "……"
+            raise RuntimeError(
+                f"仍有 {len(self.pending_requests)} 个待审批配对请求，请先回到“设备配对审批”页完成审批：{pending_preview}"
             )
-
-        if self.install_weixin.get():
-            self.append_log(">>> 微信二维码已在渠道接入页获取，执行阶段不再重复拉起登录命令")
-            if self.preview:
-                self.append_log("[PREVIEW] 预览模式下跳过执行阶段微信重复登录")
-
-        self.run_command(
-            "重启 gateway 以加载最新配置",
-            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
-        )
-        self.wait_for_gateway()
-
-        if self.preview:
-            messagebox.showinfo(
-                "开始配对 (预览)",
-                "在真实环境中此处将等待用户在手机端发起绑定。\n点击确定继续预览。",
-            )
-            self.request_id.set("preview-dummy-request-id-123456")
-            self.append_pairing_output("模拟的设备请求: preview-dummy-request-id-123456")
-            self.pending_requests = [
-                {"id": "preview-dummy-request-id-123456", "summary": "模拟的配对请求"}
-            ]
-        else:
-            messagebox.showinfo(
-                "开始配对",
-                "请先在手机端发起绑定请求，然后点击“确定”。向导会自动刷新待审批列表。",
-            )
-            self.refresh_pairings()
-
-        request_id = self.request_id.get().strip() or request_id
-        if not request_id:
-            raise RuntimeError("未发现可审批的 request id，请先在手机端发起绑定，再点一次刷新。")
-
-        self.approve_request(request_id)
 
         self.run_command(
             "配对后再次重启 gateway",
@@ -2702,7 +3012,6 @@ class FirstBootApp:
         self.wait_for_gateway()
 
         if self.preview:
-            # Only mock the check logic without actual logic for preview mode
             self.append_log("[PREVIEW] 跳过欢迎消息发送检查，认为成功。")
             delivered = True
         else:
