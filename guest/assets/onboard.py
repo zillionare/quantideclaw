@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.error
 import urllib.request
@@ -67,6 +68,21 @@ def load_env(path: Path) -> dict[str, str]:
             cleaned = cleaned[1:-1]
         env[key.strip()] = cleaned
     return env
+
+
+def expand_path(value: str) -> Path:
+    return Path(value).expanduser()
+
+
+def deep_merge_dict(base: dict[str, object], updates: dict[str, object]) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in updates.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = deep_merge_dict(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def parse_number(value: object) -> float | None:
@@ -170,11 +186,13 @@ class FirstBootApp:
         self.root.minsize(980, 780)
 
         self.env = load_env(INSTALLER_ENV)
-        self.openclaw_home = Path(self.env.get("OPENCLAW_HOME", str(Path.home() / ".openclaw")))
-        self.workspace_dir = Path(
+        self.openclaw_home = expand_path(
+            self.env.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))
+        )
+        self.workspace_dir = expand_path(
             self.env.get("OPENCLAW_WORKSPACE", str(self.openclaw_home / "workspace"))
         )
-        self.config_path = Path(
+        self.config_path = expand_path(
             self.env.get("OPENCLAW_CONFIG_PATH", str(self.openclaw_home / "openclaw.json"))
         )
         self.proxy_url = self.env.get("EDGE_TTS_PROXY_URL", "http://127.0.0.1:18792/v1")
@@ -204,10 +222,27 @@ class FirstBootApp:
         self.visible_model_results: list[dict[str, object]] = []
         self.model_query_generation = 0
         self.model_query_in_progress = False
+        self.cancelled_model_query_tokens: set[int] = set()
+        self.syncing_model_tree_selection = False
+        self.openrouter_auto_query_started = False
+        self.openrouter_prefilled_from_config = False
+        self.openrouter_auto_advance_scheduled = False
         self.model_worker_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
         self.pending_mode = "nodes"
         self.pending_requests: list[dict[str, str]] = []
         self.images: dict[str, object] = {}
+        self.openrouter_step_index = 2
+        self.channel_step_index = 3
+        self.weixin_qr_url: str | None = None
+        self.weixin_login_requested = False
+        self.weixin_login_in_progress = False
+        initial_key, initial_model = self._load_existing_openrouter_settings()
+        if initial_key:
+            self.openrouter_key.set(initial_key)
+            self.model_status.set("已从现有配置读取 OpenRouter API Key。")
+            self.openrouter_prefilled_from_config = True
+        if initial_model:
+            self.model_apply_status.set(f"现有默认模型: {initial_model}")
 
         self.current_step = 0
         self.steps = [
@@ -220,7 +255,8 @@ class FirstBootApp:
         ]
 
         self._build_ui()
-        # Moved fetch_models until the user clicks the query button to enforce they enter a key first
+        if self.openrouter_prefilled_from_config:
+            self.root.after(150, lambda: self._show_step(self.openrouter_step_index))
         self.root.deiconify()
 
     def _build_ui(self) -> None:
@@ -322,6 +358,8 @@ class FirstBootApp:
                 lbl.configure(fg="#333333", font=("Noto Sans CJK SC", 12))
 
     def _show_step(self, step_idx):
+        if self.current_step == self.openrouter_step_index and step_idx != self.openrouter_step_index:
+            self._cancel_model_query("已离开 OpenRouter 页面，停止当前模型验证。")
         # Clear main area and reset scroll
         for widget in self.main_area.winfo_children():
             widget.destroy()
@@ -345,12 +383,37 @@ class FirstBootApp:
             self.prev_btn.state(["!disabled"])
             self.next_btn.state(["!disabled"])
             self.next_btn.configure(text="下一步", command=self._next_step)
+        self._refresh_next_button_state()
         self.root.update_idletasks()
+        if (
+            step_idx == self.channel_step_index
+            and self.install_weixin.get()
+            and not self.weixin_login_requested
+            and not self.weixin_login_in_progress
+        ):
+            self.root.after(150, self._do_weixin_login)
 
     def _next_step(self):
         if self.current_step < len(self.steps) - 1:
+            if self.current_step == self.openrouter_step_index and self.model_id.get().strip():
+                self._cancel_model_query("已选择可用模型，停止其余模型验证并进入下一步。")
+            if self.current_step == 3 and self.install_weixin.get() and not self.weixin_login_requested:
+                messagebox.showerror("请先获取二维码", "请先在当前页面获取微信登录二维码，并完成扫码。")
+                return
             # Add validation logic here before proceeding if needed
             self._show_step(self.current_step + 1)
+
+    def _refresh_next_button_state(self) -> None:
+        if not hasattr(self, "next_btn"):
+            return
+        if self.current_step != self.openrouter_step_index:
+            self.next_btn.state(["!disabled"])
+            return
+        model_selected = bool(self.model_id.get().strip())
+        if not model_selected:
+            self.next_btn.state(["disabled"])
+        else:
+            self.next_btn.state(["!disabled"])
 
     def _prev_step(self):
         if self.current_step > 0:
@@ -488,6 +551,14 @@ class FirstBootApp:
         )
         query_btn.pack(side=tk.LEFT)
         self.model_query_button = query_btn
+        if (
+            self.openrouter_key.get().strip()
+            and not self.model_results
+            and not self.model_query_in_progress
+            and not self.openrouter_auto_query_started
+        ):
+            self.openrouter_auto_query_started = True
+            self.root.after(200, self._query_models_with_key)
 
         # Help buttons row
         help_row = tk.Frame(input_card, bg="#f8f9fa")
@@ -576,7 +647,7 @@ class FirstBootApp:
         # Hint label
         hint_label = tk.Label(
             self.model_frame,
-            text="💡 提示：查询后会自动逐个测试；双击测试通过的模型才会生效",
+            text="💡 提示：查询后会按新到旧测试；找到首个通过模型后会自动选中，你也可以单击切换",
             font=("Noto Sans CJK SC", 10),
             bg="#ffffff",
             fg="#888888",
@@ -618,8 +689,8 @@ class FirstBootApp:
         self.model_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Bind double-click event
-        self.model_tree.bind("<Double-1>", self.on_model_double_click)
+        # Single selection applies the model immediately.
+        self.model_tree.bind("<<TreeviewSelect>>", self.on_model_select)
 
         # If they already fetched models (going back and forth), show the frame
         if self.model_results:
@@ -637,6 +708,7 @@ class FirstBootApp:
         self.model_frame.pack(fill=tk.BOTH, expand=True)
         self.model_query_generation += 1
         query_token = self.model_query_generation
+        self.cancelled_model_query_tokens.discard(query_token)
         self.model_results = []
         self.visible_model_results = []
         self.model_id.set("")
@@ -644,6 +716,7 @@ class FirstBootApp:
         self.model_apply_status.set("尚未通过 openclaw 应用模型。")
         self._apply_model_search(log_summary=False)
         self._set_model_query_busy(True)
+        self._refresh_next_button_state()
         self.append_log(">>> 已启动后台模型查询与测试任务")
         threading.Thread(
             target=self._fetch_models_worker,
@@ -662,6 +735,31 @@ class FirstBootApp:
                 )
             except tk.TclError:
                 pass
+        self._refresh_next_button_state()
+
+    def _is_model_query_cancelled(self, query_token: int) -> bool:
+        return query_token in self.cancelled_model_query_tokens
+
+    def _cancel_model_query(self, reason: str) -> None:
+        if not self.model_query_in_progress:
+            return
+        query_token = self.model_query_generation
+        self.cancelled_model_query_tokens.add(query_token)
+        self._set_model_query_busy(False)
+        self.append_log(f">>> {reason}")
+        selected_model = self.model_id.get().strip()
+        if selected_model:
+            self.model_status.set(f"已选中可用模型 {selected_model}，已停止剩余测试。")
+        else:
+            self.model_status.set("已停止模型测试。")
+
+    def _widget_exists(self, widget: object | None) -> bool:
+        if widget is None:
+            return False
+        try:
+            return bool(widget.winfo_exists())
+        except Exception:
+            return False
 
     def _fetch_models_worker(self, query_token: int, api_key: str) -> None:
         self.model_worker_queue.put(("log", query_token, ">>> 正在获取 OpenRouter 免费文本模型列表"))
@@ -692,15 +790,33 @@ class FirstBootApp:
 
         passed_count = 0
         total = len(filtered)
+        tested_count = 0
+        cancelled = False
         for index, entry in enumerate(filtered, start=1):
+            if self._is_model_query_cancelled(query_token):
+                cancelled = True
+                break
             model_id = str(entry["id"])
             self.model_worker_queue.put(("progress", query_token, index, total, model_id))
             ok, message = self._probe_model_request(model_id, api_key)
+            tested_count = index
+            if self._is_model_query_cancelled(query_token):
+                cancelled = True
+                break
             if ok:
                 passed_count += 1
             self.model_worker_queue.put(("result", query_token, index - 1, model_id, ok, message))
+            lowered = message.lower()
+            if (
+                "401" in lowered
+                or "unauthorized" in lowered
+                or "invalid api key" in lowered
+                or "authentication" in lowered
+            ):
+                break
 
-        self.model_worker_queue.put(("done", query_token, passed_count, total))
+        event_type = "cancelled" if cancelled else "done"
+        self.model_worker_queue.put((event_type, query_token, passed_count, tested_count or total))
 
     def _drain_model_worker_queue(self, query_token: int) -> None:
         while True:
@@ -711,6 +827,8 @@ class FirstBootApp:
             event_type = str(event[0])
             event_token = int(event[1])
             if event_token != self.model_query_generation or event_token != query_token:
+                continue
+            if self._is_model_query_cancelled(event_token) and event_type not in {"cancelled", "done"}:
                 continue
             if event_type == "log":
                 self.append_log(str(event[2]))
@@ -735,19 +853,21 @@ class FirstBootApp:
                 )
             elif event_type == "done":
                 self._finish_model_query(event_token, int(event[2]), int(event[3]))
+            elif event_type == "cancelled":
+                self._finish_model_query(event_token, int(event[2]), int(event[3]), cancelled=True)
 
         if query_token == self.model_query_generation and self.model_query_in_progress:
             self.root.after(50, lambda: self._drain_model_worker_queue(query_token))
 
     def _handle_model_query_error(self, query_token: int, error: str) -> None:
-        if query_token != self.model_query_generation:
+        if query_token != self.model_query_generation or self._is_model_query_cancelled(query_token):
             return
         self._set_model_query_busy(False)
         self.append_log(f"ERROR: 获取模型列表失败: {error}")
         self.model_status.set(f"模型列表加载失败: {error}")
 
     def _install_model_candidates(self, query_token: int, filtered: list[dict[str, object]]) -> None:
-        if query_token != self.model_query_generation:
+        if query_token != self.model_query_generation or self._is_model_query_cancelled(query_token):
             return
         self.model_results = filtered
         self.append_log(f">>> 免费文本候选数: {len(filtered)}")
@@ -764,7 +884,7 @@ class FirstBootApp:
         total: int,
         model_id: str,
     ) -> None:
-        if query_token != self.model_query_generation:
+        if query_token != self.model_query_generation or self._is_model_query_cancelled(query_token):
             return
         self.model_status.set(f"正在测试模型 {current}/{total}: {model_id}")
         self.append_log(f">>> 测试模型 {current}/{total}: {model_id}")
@@ -777,7 +897,7 @@ class FirstBootApp:
         passed: bool,
         detail: str,
     ) -> None:
-        if query_token != self.model_query_generation:
+        if query_token != self.model_query_generation or self._is_model_query_cancelled(query_token):
             return
         if row_index >= len(self.model_results):
             return
@@ -792,16 +912,98 @@ class FirstBootApp:
         else:
             self.append_log(f"WARN: 模型测试失败: {model_id} -> {detail}")
         self._apply_model_search(log_summary=False)
+        if passed and self.current_step == self.openrouter_step_index:
+            self.model_status.set(
+                f"已找到可用模型 {model_id}；你现在可以点击“下一步”，也可以继续等待更多模型验证结果。"
+            )
 
-    def _finish_model_query(self, query_token: int, passed_count: int, total: int) -> None:
+    def _finish_model_query(self, query_token: int, passed_count: int, total: int, *, cancelled: bool = False) -> None:
         if query_token != self.model_query_generation:
             return
         self._set_model_query_busy(False)
+        if cancelled:
+            self.cancelled_model_query_tokens.discard(query_token)
+            return
         if total == 0:
             self.model_status.set("当前没有符合条件的免费文本模型。")
             return
         self.model_status.set(f"测试完成：{passed_count}/{total} 个模型可用。")
         self.append_log(f">>> 测试完成，可用模型数: {passed_count} / {total}")
+
+    def _sync_model_tree_selection(self) -> None:
+        model_tree = getattr(self, "model_tree", None)
+        if not self._widget_exists(model_tree):
+            return
+        selected = self.model_id.get().strip()
+        try:
+            current = model_tree.selection()
+        except tk.TclError:
+            return
+        if not selected:
+            if current:
+                self.syncing_model_tree_selection = True
+                try:
+                    model_tree.selection_remove(*current)
+                finally:
+                    self.syncing_model_tree_selection = False
+            return
+        try:
+            children = model_tree.get_children()
+        except tk.TclError:
+            return
+        for item in children:
+            try:
+                values = model_tree.item(item).get("values", [])
+            except tk.TclError:
+                return
+            if len(values) >= 3 and str(values[2]) == selected:
+                self.syncing_model_tree_selection = True
+                try:
+                    if tuple(current) != (item,):
+                        model_tree.selection_set(item)
+                    model_tree.focus(item)
+                    model_tree.see(item)
+                except tk.TclError:
+                    return
+                finally:
+                    self.syncing_model_tree_selection = False
+                return
+
+    def _select_model(self, model_id: str, *, auto_selected: bool = False) -> bool:
+        matched_entry = next(
+            (entry for entry in self.model_results if str(entry.get("id")) == model_id),
+            None,
+        )
+        if matched_entry is None:
+            return False
+        if not matched_entry.get("test_ok"):
+            self.append_log(f"WARN: 阻止选择测试失败模型: {model_id}")
+            return False
+        if self.model_id.get().strip() == model_id:
+            self._refresh_next_button_state()
+            return True
+        self.model_id.set(model_id)
+        normalized_model_id = normalize_model_id(model_id)
+        self.model_apply_status.set(
+            f"已选择模型: {normalized_model_id}；将在完成初始化时通过 openclaw 应用"
+        )
+        self._sync_model_tree_selection()
+        self._refresh_next_button_state()
+        self.root.update_idletasks()
+        if auto_selected:
+            self.append_log(f">>> 已自动选择首个可用模型: {model_id}")
+        else:
+            self.append_log(f">>> 已选择模型: {model_id}")
+        if (
+            auto_selected
+            and self.openrouter_prefilled_from_config
+            and self.current_step == self.openrouter_step_index
+            and not self.openrouter_auto_advance_scheduled
+        ):
+            self.openrouter_auto_advance_scheduled = True
+            self.append_log(">>> 已自动选择模型，准备进入渠道接入页。")
+            self.root.after(300, lambda: self._show_step(self.channel_step_index))
+        return True
 
     def _build_channel_step(self, parent):
         # Main container
@@ -951,45 +1153,59 @@ class FirstBootApp:
 
     def _do_weixin_login(self) -> None:
         """Execute WeChat login command and display QR code."""
+        if self.weixin_login_in_progress:
+            return
         if self.preview:
             # Preview mode: show mock QR
+            self.weixin_login_requested = True
+            self.weixin_qr_url = "https://weixin.qq.com/mock-qr-for-preview"
             self._show_weixin_qr_in_frame("https://weixin.qq.com/mock-qr-for-preview")
             return
+        self.weixin_login_in_progress = True
+        self._show_weixin_login_loading()
+        threading.Thread(target=self._fetch_weixin_qr_worker, daemon=True).start()
 
-        # Run login command
-        self.append_log(">>> 正在获取微信登录二维码...")
-        login_result = self.run_command(
-            "获取微信登录二维码",
-            f"openclaw channels login --channel {shell_quote(self.weixin_channel)}",
-            allow_failure=True,
-        )
+    def _fetch_weixin_qr_worker(self) -> None:
+        qr_url = self._fetch_weixin_qr_url()
+        self.root.after(0, lambda: self._handle_weixin_qr_result(qr_url))
 
-        # Try to extract QR code URL from output
-        qr_url = None
-        if login_result.returncode == 0:
-            for line in login_result.stdout.splitlines():
-                line = line.strip()
-                if line.startswith("https://"):
-                    qr_url = line
-                    break
-                # Check for QR data in output
-                if "qr" in line.lower() or "二维码" in line:
-                    import re as re_module
-                    url_match = re_module.search(r'https?://[^\s<>"\']+', line)
-                    if url_match:
-                        qr_url = url_match.group(0)
-                        break
-
+    def _handle_weixin_qr_result(self, qr_url: str | None) -> None:
+        self.weixin_login_in_progress = False
         if qr_url:
+            self.weixin_login_requested = True
+            self.weixin_qr_url = qr_url
             self.append_log(f">>> 获取到二维码 URL: {qr_url[:50]}...")
             self._show_weixin_qr_in_frame(qr_url)
-        else:
-            self.append_log("WARN: 未能获取二维码，请检查命令输出")
-            messagebox.showerror(
-                "获取二维码失败",
-                "未能从命令输出中获取二维码。\n"
-                "请确保 openclaw channels login 命令正常工作。",
-            )
+            return
+        self.append_log("WARN: 未能获取二维码，请检查命令输出")
+        self._show_weixin_login_button()
+        messagebox.showerror(
+            "获取二维码失败",
+            "未能从命令输出中获取二维码。\n"
+            "请确保 openclaw channels login 命令正常工作。",
+        )
+
+    def _show_weixin_login_loading(self) -> None:
+        for widget in self.weixin_qr_frame.winfo_children():
+            widget.destroy()
+        tk.Label(
+            self.weixin_qr_frame,
+            text="正在获取微信登录二维码...",
+            font=("Noto Sans CJK SC", 11),
+            bg="#f8f9fa",
+            fg="#333333",
+            wraplength=220,
+            justify=tk.CENTER,
+        ).pack(pady=(20, 10))
+        tk.Label(
+            self.weixin_qr_frame,
+            text="请稍候，拿到二维码后会自动显示在这里",
+            font=("Noto Sans CJK SC", 10),
+            bg="#f8f9fa",
+            fg="#888888",
+            wraplength=220,
+            justify=tk.CENTER,
+        ).pack()
 
     def _show_weixin_qr_in_frame(self, qr_url: str) -> None:
         """Display QR code in the WeChat section frame."""
@@ -1655,6 +1871,29 @@ class FirstBootApp:
     def fetch_models(self) -> None:
         self._query_models_with_key()
 
+    def _load_existing_openrouter_settings(self) -> tuple[str, str]:
+        key = self.env.get("OPENROUTER_API_KEY", "").strip()
+        model_id = ""
+        if not self.config_path.exists():
+            return key, model_id
+        try:
+            loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return key, model_id
+        if not isinstance(loaded, dict):
+            return key, model_id
+        env_config = loaded.get("env")
+        if isinstance(env_config, dict):
+            config_key = str(env_config.get("OPENROUTER_API_KEY") or "").strip()
+            if config_key:
+                key = config_key
+        agents = loaded.get("agents")
+        if isinstance(agents, dict):
+            defaults = agents.get("defaults")
+            if isinstance(defaults, dict):
+                model_id = str(defaults.get("model") or "").strip()
+        return key, model_id
+
     def _extract_candidate(self, model: dict[str, object]) -> dict[str, object] | None:
         model_id = str(model.get("id") or "").strip()
         if not model_id:
@@ -1708,7 +1947,7 @@ class FirstBootApp:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=25) as response:
+            with urllib.request.urlopen(request, timeout=8) as response:
                 json.load(response)
             return True, "通过"
         except Exception as exc:
@@ -1743,28 +1982,29 @@ class FirstBootApp:
                 or query in str(entry["family"]).lower()
             ]
 
-        # Update Treeview
-        if hasattr(self, "model_tree"):
-            # Clear existing items
-            for item in self.model_tree.get_children():
-                self.model_tree.delete(item)
-            # Insert new items
-            for entry in visible[:200]:
-                test_status = str(entry.get("test_status") or "待测试")
-                row_tag = "passed" if entry.get("test_ok") else "failed"
-                if test_status == "待测试":
-                    row_tag = "pending"
-                self.model_tree.insert(
-                    "",
-                    tk.END,
-                    values=(
-                        entry["created_label"],
-                        entry["family"],
-                        entry["id"],
-                        test_status if test_status == "通过" else f"{test_status}: {entry.get('test_message', '')}",
-                    ),
-                    tags=(row_tag,),
-                )
+        model_tree = getattr(self, "model_tree", None)
+        if self._widget_exists(model_tree):
+            try:
+                for item in model_tree.get_children():
+                    model_tree.delete(item)
+                for entry in visible[:200]:
+                    test_status = str(entry.get("test_status") or "待测试")
+                    row_tag = "passed" if entry.get("test_ok") else "failed"
+                    if test_status == "待测试":
+                        row_tag = "pending"
+                    model_tree.insert(
+                        "",
+                        tk.END,
+                        values=(
+                            entry["created_label"],
+                            entry["family"],
+                            entry["id"],
+                            test_status if test_status == "通过" else f"{test_status}: {entry.get('test_message', '')}",
+                        ),
+                        tags=(row_tag,),
+                    )
+            except tk.TclError:
+                pass
 
         self.visible_model_results = visible
         if log_summary:
@@ -1774,43 +2014,59 @@ class FirstBootApp:
             for entry in self.model_results:
                 if str(entry["id"]) == selected and not entry.get("test_ok"):
                     self.model_id.set("")
+                    self._refresh_next_button_state()
                     break
         if not self.model_id.get().strip():
             for entry in visible:
-                if entry.get("test_ok"):
-                    self.model_id.set(str(entry["id"]))
+                if entry.get("test_ok") and self._select_model(str(entry["id"]), auto_selected=True):
                     break
+        self._sync_model_tree_selection()
 
-    def on_model_double_click(self, _event: object | None = None) -> None:
-        """Handle double-click on model tree item."""
-        selection = self.model_tree.selection()
+    def on_model_select(self, _event: object | None = None) -> None:
+        """Handle single selection on model tree item."""
+        model_tree = getattr(self, "model_tree", None)
+        if self.syncing_model_tree_selection or not self._widget_exists(model_tree):
+            return
+        try:
+            selection = model_tree.selection()
+        except tk.TclError:
+            return
         if selection:
-            item = self.model_tree.item(selection[0])
+            try:
+                item = model_tree.item(selection[0])
+            except tk.TclError:
+                return
             values = item.get("values", [])
             if values and len(values) >= 3:
-                model_id = str(values[2])  # model_id is the 3rd column
-                matched_entry = next(
-                    (entry for entry in self.model_results if str(entry["id"]) == model_id),
-                    None,
-                )
-                if matched_entry is None:
-                    messagebox.showerror("提示", "未找到所选模型的测试结果。")
-                    return
-                if not matched_entry.get("test_ok"):
-                    reason = str(matched_entry.get("test_message") or "测试未通过")
-                    self.append_log(f"WARN: 阻止选择测试失败模型: {model_id}")
-                    messagebox.showwarning("模型不可用", f"该模型测试未通过，不能选择。\n\n原因: {reason}")
-                    return
-                try:
-                    self.model_id.set(model_id)
-                    self._apply_model_with_openclaw(model_id)
-                except Exception as exc:
-                    self.model_id.set("")
-                    self.model_apply_status.set(f"应用模型失败: {exc}")
-                    messagebox.showerror("模型应用失败", f"已选择模型，但调用 openclaw 设置失败。\n\n原因: {exc}")
-                    return
-                self.append_log(f">>> 已选择模型: {model_id}")
-                messagebox.showinfo("模型已选择", f"已选择模型: {model_id}")
+                self._select_model(str(values[2]))
+
+    def _extract_qr_url(self, output: str) -> str | None:
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("https://") and (
+                "qr" in line.lower() or "login" in line.lower() or "weixin" in line.lower()
+            ):
+                return line
+            if "qr" in line.lower() or "二维码" in line:
+                url_match = re.search(r'https?://[^\s<>"\']+', line)
+                if url_match:
+                    return url_match.group(0)
+        return None
+
+    def _fetch_weixin_qr_url(self) -> str | None:
+        self.append_log(">>> 正在获取微信登录二维码...")
+        login_result = self.run_command(
+            "获取微信登录二维码",
+            f"openclaw channels login --channel {shell_quote(self.weixin_channel)}",
+            allow_failure=True,
+            timeout=8,
+        )
+        combined_output = "\n".join(
+            part for part in [login_result.stdout, login_result.stderr] if part and part.strip()
+        )
+        return self._extract_qr_url(combined_output)
 
     def run_command(
         self,
@@ -1827,13 +2083,23 @@ class FirstBootApp:
             self.append_log(f"[PREVIEW] 模拟执行 {title} 跳过实际调用")
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        process = subprocess.run(
-            command,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
+        try:
+            process = subprocess.run(
+                command,
+                shell=True,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            self.append_log(f"WARN: {title} 超时（{timeout}s），将使用已输出内容继续处理")
+            process = subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
 
         if process.stdout.strip():
             for line in process.stdout.strip().splitlines()[:40]:
@@ -1880,16 +2146,31 @@ class FirstBootApp:
 
     def write_config(self, user_name: str, agent_name: str, model_id: str, key: str) -> None:
         if self.preview:
-            self.append_log(f"[PREVIEW] 写入配置文件: user_name={user_name}, agent_name={agent_name}, model_id={model_id}, key={key[:4]}...{key[-4:] if len(key)>8 else ''}")
+            self.append_log(
+                f"[PREVIEW] 写入配置文件: user_name={user_name}, agent_name={agent_name}, "
+                f"model_id={model_id}, browser_profile=user, "
+                f"key={key[:4]}...{key[-4:] if len(key)>8 else ''}"
+            )
             return
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        config = {
+        browser_tools = {"browser": {"profile": "user"}}
+        existing_config: dict[str, object] = {}
+        if self.config_path.exists():
+            try:
+                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing_config = loaded
+            except (OSError, json.JSONDecodeError):
+                self.append_log("WARN: 现有 openclaw.json 无法解析，将覆盖为新的向导配置。")
+
+        managed_config: dict[str, object] = {
             "env": {"OPENROUTER_API_KEY": key},
             "tools": {
                 "profile": "coding",
                 "web": {"search": {"enabled": True, "provider": "duckduckgo"}},
             },
+            "gateway": {"mode": "local"},
             "session": {"dmScope": "per-channel-peer"},
             "messages": {
                 "tts": {
@@ -1908,6 +2189,7 @@ class FirstBootApp:
                 "defaults": {
                     "workspace": str(self.workspace_dir),
                     "model": normalize_model_id(model_id),
+                    "tools": browser_tools,
                 },
                 "list": [
                     {
@@ -1915,12 +2197,25 @@ class FirstBootApp:
                         "default": True,
                         "workspace": str(self.workspace_dir),
                         "model": normalize_model_id(model_id),
+                        "tools": browser_tools,
                         "identity": {"name": agent_name},
                     }
                 ],
             },
             "profile": {"user": {"name": user_name}},
         }
+        config = deep_merge_dict(existing_config, managed_config)
+        plugins_config = config.get("plugins")
+        if not isinstance(plugins_config, dict):
+            plugins_config = {}
+        if self.install_weixin.get():
+            allow_list = plugins_config.get("allow")
+            if not isinstance(allow_list, list):
+                allow_list = []
+            if "openclaw-weixin" not in allow_list:
+                allow_list.append("openclaw-weixin")
+            plugins_config["allow"] = allow_list
+        config["plugins"] = plugins_config
         self.config_path.write_text(
             json.dumps(config, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -2114,10 +2409,23 @@ class FirstBootApp:
             self.append_log("[PREVIEW] 跳过等待 gateway")
             return
 
-        for _ in range(10):
-            result = self.run_command("检查 gateway 状态", "openclaw health", allow_failure=True, timeout=30)
+        last_failure: str | None = None
+        for attempt in range(1, 7):
+            self.append_log(f">>> 检查 gateway 状态 (第 {attempt}/6 次)")
+            result = self.run_command(
+                "检查 gateway 状态",
+                "openclaw health",
+                allow_failure=True,
+                timeout=5,
+            )
             if result.returncode == 0:
                 return
+            last_output = (result.stderr or result.stdout or "").strip()
+            if last_output:
+                last_failure = last_output.splitlines()[-1]
+            time.sleep(1)
+        if last_failure:
+            raise RuntimeError(f"QuantideClaw gateway 未能启动: {last_failure}")
         raise RuntimeError("QuantideClaw gateway 未能在预期时间内启动。")
 
     def run_setup(self) -> None:
@@ -2198,63 +2506,9 @@ class FirstBootApp:
             )
 
         if self.install_weixin.get():
-            self.append_log(">>> 开始微信登录流程")
-            
+            self.append_log(">>> 微信二维码已在渠道接入页获取，执行阶段不再重复拉起登录命令")
             if self.preview:
-                # Preview mode: show mock QR code dialog
-                self.append_log("[PREVIEW] 模拟微信登录流程")
-                mock_qr_url = "https://weixin.qq.com/mock-login-qr-for-preview-mode"
-                self.root.after(100, lambda: self.show_weixin_qr_dialog(mock_qr_url))
-                messagebox.showinfo(
-                    "微信登录 (预览模式)",
-                    "【预览模式】模拟微信登录流程\n\n"
-                    "在真实环境中，这里会显示实际的微信登录二维码。\n"
-                    "点击确定继续预览。",
-                )
-            else:
-                # Run login command and capture QR code URL
-                login_result = self.run_command(
-                    "获取微信登录二维码",
-                    f"openclaw channels login --channel {shell_quote(self.weixin_channel)}",
-                    allow_failure=True,
-                )
-                
-                # Try to extract QR code URL from output
-                qr_url = None
-                if login_result.returncode == 0:
-                    # Parse output to find QR code URL
-                    # Common patterns: URL starting with https://, or specific format
-                    for line in login_result.stdout.splitlines():
-                        line = line.strip()
-                        if line.startswith("https://") and ("qr" in line.lower() or "login" in line.lower() or "weixin" in line.lower()):
-                            qr_url = line
-                            break
-                        # Also check for qr code data in brackets or quotes
-                        if "qr" in line.lower() or "二维码" in line:
-                            # Try to extract URL from the line
-                            import re as re_module
-                            url_match = re_module.search(r'https?://[^\s<>"\']+', line)
-                            if url_match:
-                                qr_url = url_match.group(0)
-                                break
-                
-                if qr_url:
-                    self.append_log(f">>> 检测到二维码 URL: {qr_url[:50]}...")
-                    # Show QR code dialog
-                    self.root.after(100, lambda: self.show_weixin_qr_dialog(qr_url))
-                    # Wait for user to scan (dialog is modal)
-                    messagebox.showinfo(
-                        "微信登录",
-                        "请在弹出的对话框中扫描二维码登录。\n"
-                        "扫码完成后，点击「我已扫码」按钮继续。",
-                    )
-                else:
-                    self.append_log("WARN: 未能从输出中检测到二维码 URL，请在终端查看")
-                    messagebox.showinfo(
-                        "微信登录",
-                        "请在终端查看二维码并完成登录。\n"
-                        "登录完成后点击确定继续。",
-                    )
+                self.append_log("[PREVIEW] 预览模式下跳过执行阶段微信重复登录")
 
         self.run_command(
             "重启 gateway 以加载最新配置",
