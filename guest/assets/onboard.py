@@ -252,8 +252,10 @@ class FirstBootApp:
         self.browser_status_path = Path(
             self.env.get("CHROME_STATUS_FILE", "/var/lib/quantideclaw-build/browser-status.txt")
         )
+        self.weixin_plugin_id = "openclaw-weixin"
         self.weixin_channel = self.env.get("WEIXIN_CHANNEL", "openclaw-weixin")
         self.qq_channel = self.env.get("QQBOT_CHANNEL", "qqbot")
+        self.qq_plugin_id = "openclaw-qqbot"
 
         self.agent_name = tk.StringVar(value="Eve")
         self.user_name = tk.StringVar(value="Quantide")
@@ -2629,6 +2631,28 @@ class FirstBootApp:
             except (OSError, json.JSONDecodeError):
                 self.append_log("WARN: 现有 openclaw.json 无法解析，将覆盖为新的向导配置。")
 
+        gateway_token = ""
+        existing_gateway = existing_config.get("gateway")
+        if isinstance(existing_gateway, dict):
+            existing_auth = existing_gateway.get("auth")
+            if isinstance(existing_auth, dict):
+                gateway_token = str(existing_auth.get("token") or "").strip()
+        if not gateway_token:
+            user_config_path = Path.home() / ".openclaw" / "openclaw.json"
+            if user_config_path != self.config_path and user_config_path.exists():
+                try:
+                    loaded = json.loads(user_config_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        gateway = loaded.get("gateway")
+                        if isinstance(gateway, dict):
+                            auth = gateway.get("auth")
+                            if isinstance(auth, dict):
+                                gateway_token = str(auth.get("token") or "").strip()
+                except (OSError, json.JSONDecodeError):
+                    gateway_token = ""
+        if not gateway_token:
+            gateway_token = secrets.token_hex(24)
+
         normalized_model_id = normalize_model_id(model_id)
         managed_config: dict[str, object] = {
             "env": {"OPENROUTER_API_KEY": key},
@@ -2636,7 +2660,13 @@ class FirstBootApp:
                 "profile": "coding",
                 "web": {"search": {"enabled": True, "provider": "duckduckgo"}},
             },
-            "gateway": {"mode": "local"},
+            "gateway": {
+                "mode": "local",
+                "auth": {
+                    "mode": "token",
+                    "token": gateway_token,
+                },
+            },
             "session": {"dmScope": "per-channel-peer"},
             "messages": {
                 "tts": {
@@ -2680,12 +2710,12 @@ class FirstBootApp:
             allow_list = []
         allow_list = [
             item for item in allow_list
-            if item not in {"openclaw-weixin", self.qq_channel}
+            if item not in {self.weixin_plugin_id, self.qq_channel, self.qq_plugin_id}
         ]
         if self.install_weixin.get():
-            allow_list.append("openclaw-weixin")
+            allow_list.append(self.weixin_plugin_id)
         if self.install_qqbot.get():
-            allow_list.append(self.qq_channel)
+            allow_list.append(self.qq_plugin_id)
         plugins_config["allow"] = allow_list
         config["plugins"] = plugins_config
         self.config_path.write_text(
