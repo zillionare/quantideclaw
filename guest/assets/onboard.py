@@ -53,6 +53,10 @@ REQUEST_ID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
 )
+GATEWAY_HEALTH_NOISE_PATTERNS = (
+    re.compile(r"qqbot-remind", re.IGNORECASE),
+    re.compile(r"registered\s+qqbot\s+remind\s+tool", re.IGNORECASE),
+)
 
 
 class WelcomeMessagePending(RuntimeError):
@@ -229,6 +233,12 @@ def shell_quote(value: str) -> str:
     return shlex.quote(value)
 
 
+def env_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class FirstBootApp:
     def __init__(self, root: tk.Tk, preview: bool = False) -> None:
         self.preview = preview
@@ -271,6 +281,20 @@ class FirstBootApp:
         self.qq_app_id = tk.StringVar()
         self.qq_app_secret = tk.StringVar()
         self.request_id = tk.StringVar()
+
+        prefill_openrouter_key = self.env.get("OPENROUTER_API_KEY", "").strip()
+        if prefill_openrouter_key:
+            self.openrouter_key.set(prefill_openrouter_key)
+            self.model_status.set("已从安装环境预填 OpenRouter API Key。")
+
+        prefill_qq_app_id = self.env.get("QQBOT_APP_ID", "").strip()
+        prefill_qq_secret = self.env.get("QQBOT_CLIENT_SECRET", "").strip()
+        if prefill_qq_app_id:
+            self.qq_app_id.set(prefill_qq_app_id)
+        if prefill_qq_secret:
+            self.qq_app_secret.set(prefill_qq_secret)
+        if prefill_qq_app_id and prefill_qq_secret:
+            self.install_qqbot.set(env_truthy(self.env.get("QQBOT_PREFILL_ENABLED", "1")))
 
         self.model_results: list[dict[str, object]] = []
         self.visible_model_results: list[dict[str, object]] = []
@@ -2358,6 +2382,23 @@ class FirstBootApp:
                 model_id = str(defaults.get("model") or "").strip()
         return key, model_id
 
+    def _build_qq_channel_config(self) -> dict[str, object] | None:
+        if not self.install_qqbot.get():
+            return None
+
+        app_id = self.qq_app_id.get().strip()
+        client_secret = self.qq_app_secret.get().strip()
+        if not app_id or not client_secret:
+            return None
+
+        return {
+            "enabled": True,
+            "appId": app_id,
+            "clientSecret": client_secret,
+            "allowFrom": ["*"],
+            "markdownSupport": True,
+        }
+
     def _extract_candidate(self, model: dict[str, object]) -> dict[str, object] | None:
         model_id = str(model.get("id") or "").strip()
         if not model_id:
@@ -2701,6 +2742,20 @@ class FirstBootApp:
         }
         config = deep_merge_dict(existing_config, managed_config)
         config = migrate_openclaw_config_schema(config)
+
+        channels_config = config.get("channels")
+        if not isinstance(channels_config, dict):
+            channels_config = {}
+
+        qq_channel_config = self._build_qq_channel_config()
+        if qq_channel_config:
+            existing_qq_config = channels_config.get(self.qq_channel)
+            if isinstance(existing_qq_config, dict):
+                channels_config[self.qq_channel] = deep_merge_dict(existing_qq_config, qq_channel_config)
+            else:
+                channels_config[self.qq_channel] = qq_channel_config
+        config["channels"] = channels_config
+
         plugins_config = config.get("plugins")
         if not isinstance(plugins_config, dict):
             plugins_config = {}
@@ -2772,23 +2827,6 @@ class FirstBootApp:
             "/usr/local/bin/quantideclaw-session-start --restart-gateway",
         )
         self.wait_for_gateway()
-
-        if self.install_qqbot.get():
-            token = f"{self.qq_app_id.get().strip()}:{self.qq_app_secret.get().strip()}"
-            qq_result = self.run_command(
-                "配置 QQ Bot 渠道",
-                f"openclaw channels add --channel {shell_quote(self.qq_channel)} --token {shell_quote(token)}",
-                allow_failure=True,
-            )
-            if qq_result.returncode != 0:
-                qq_error = (qq_result.stderr or qq_result.stdout or "").strip()
-                qq_error_lower = qq_error.lower()
-                if qq_error and any(word in qq_error_lower for word in ("already", "exists", "duplicate")):
-                    self.append_log(">>> QQ Bot 渠道已存在，继续沿用现有配置")
-                elif "已存在" in qq_error:
-                    self.append_log(">>> QQ Bot 渠道已存在，继续沿用现有配置")
-                else:
-                    raise RuntimeError(qq_error or "配置 QQ Bot 渠道失败。")
 
         if self.install_weixin.get():
             self.append_log(">>> 微信扫码状态沿用渠道接入页当前结果")
@@ -3103,6 +3141,34 @@ class FirstBootApp:
 
         ttk.Button(frame, text="关闭", command=dialog.destroy).pack(anchor=tk.E, pady=(12, 0))
 
+    def _extract_command_output_lines(self, result: subprocess.CompletedProcess[str]) -> list[str]:
+        lines: list[str] = []
+        for payload in (result.stderr, result.stdout):
+            if not payload:
+                continue
+            for raw_line in payload.splitlines():
+                clean_line = self._strip_ansi(raw_line).strip()
+                if clean_line:
+                    lines.append(clean_line)
+        return lines
+
+    def _is_gateway_health_noise_line(self, line: str) -> bool:
+        normalized = self._strip_ansi(line).strip()
+        if not normalized:
+            return False
+        return any(pattern.search(normalized) for pattern in GATEWAY_HEALTH_NOISE_PATTERNS)
+
+    def _probe_gateway_control_plane(self) -> bool:
+        probe_commands = (
+            ("复核 gateway 设备列表", "openclaw devices list --json"),
+            ("复核 gateway 待审批请求", "openclaw nodes pending --json"),
+        )
+        for title, command in probe_commands:
+            result = self.run_command(title, command, allow_failure=True, timeout=5)
+            if result.returncode == 0:
+                return True
+        return False
+
     def wait_for_gateway(self) -> None:
         if self.preview:
             self.append_log("[PREVIEW] 跳过等待 gateway")
@@ -3119,9 +3185,23 @@ class FirstBootApp:
             )
             if result.returncode == 0:
                 return
-            last_output = (result.stderr or result.stdout or "").strip()
-            if last_output:
-                last_failure = last_output.splitlines()[-1]
+
+            output_lines = self._extract_command_output_lines(result)
+            if output_lines and all(self._is_gateway_health_noise_line(line) for line in output_lines):
+                self.append_log(
+                    ">>> health 输出包含已知 QQBot 噪声，改用控制面命令复核 gateway 是否已可用"
+                )
+                if self._probe_gateway_control_plane():
+                    self.append_log(">>> gateway 控制面复核通过，继续后续初始化流程")
+                    return
+
+            meaningful_lines = [
+                line for line in output_lines if not self._is_gateway_health_noise_line(line)
+            ]
+            if meaningful_lines:
+                last_failure = meaningful_lines[-1]
+            elif output_lines:
+                last_failure = "gateway 健康检查返回了已知 QQBot 噪声，但控制面复核尚未通过。"
             time.sleep(1)
         if last_failure:
             raise RuntimeError(f"QuantideClaw gateway 未能启动: {last_failure}")
