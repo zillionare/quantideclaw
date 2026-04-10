@@ -381,7 +381,7 @@ if [[ -r "${INSTALLER_ENV}" ]]; then
         value="$(trim "${raw_value}")"
         value="$(strip_matching_quotes "${value}")"
         case "${key}" in
-            OPENCLAW_HOME|OPENCLAW_ASSETS_DIR|OPENCLAW_CONFIG_PATH|OPENCLAW_WORKSPACE|WEIXIN_PLUGIN_PACKAGE|WEIXIN_CHANNEL|QQBOT_CHANNEL|EDGE_TTS_PROXY_URL|EDGE_TTS_DEFAULT_VOICE|CHROME_STATUS_FILE)
+            OPENCLAW_HOME|OPENCLAW_ASSETS_DIR|OPENCLAW_CONFIG_PATH|OPENCLAW_WORKSPACE|WEIXIN_PLUGIN_PACKAGE|WEIXIN_CHANNEL|QQBOT_PLUGIN_PACKAGE|QQBOT_CHANNEL|EDGE_TTS_PROXY_URL|EDGE_TTS_DEFAULT_VOICE|CHROME_STATUS_FILE)
                 export "${key}=${value}"
                 ;;
         esac
@@ -426,9 +426,39 @@ install_weixin_plugin_for_user() {
     su - "${BUILD_USER}" -s /bin/bash -c '
         set -euo pipefail
         plugin_root="$HOME/.openclaw"
-        rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
+        plugin_package="${WEIXIN_PLUGIN_PACKAGE:-@tencent-weixin/openclaw-weixin}"
+        install_log="$(mktemp)"
+        trap "rm -f \"$install_log\"" EXIT
         mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
-        /usr/local/bin/quantideclaw-openclaw plugins install @tencent-weixin/openclaw-weixin
+
+        for attempt in 1 2 3 4 5; do
+            rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
+            if /usr/local/bin/quantideclaw-openclaw plugins install "$plugin_package" >"$install_log" 2>&1; then
+                cat "$install_log"
+                exit 0
+            fi
+
+            cat "$install_log" >&2
+            if grep -Eiq "rate.?limit|too many requests|429" "$install_log" && [[ "$attempt" -lt 5 ]]; then
+                sleep_seconds=$((attempt * 15))
+                echo "[WARN] Weixin plugin install hit rate limit, retrying in ${sleep_seconds}s..." >&2
+                sleep "$sleep_seconds"
+                continue
+            fi
+
+            exit 1
+        done
+    '
+}
+
+install_qqbot_plugin_for_user() {
+    su - "${BUILD_USER}" -s /bin/bash -c '
+        set -euo pipefail
+        plugin_root="$HOME/.openclaw"
+        rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
+        mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
+        /usr/local/bin/quantideclaw-openclaw plugins install @tencent-connect/openclaw-qqbot@latest
+        /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
     '
 }
 
@@ -444,6 +474,7 @@ OPENCLAW_CONFIG_PATH=~/.openclaw/openclaw.json
 OPENCLAW_WORKSPACE=~/.openclaw/workspace
 WEIXIN_PLUGIN_PACKAGE=@tencent-weixin/openclaw-weixin
 WEIXIN_CHANNEL=openclaw-weixin
+QQBOT_PLUGIN_PACKAGE=@tencent-connect/openclaw-qqbot@latest
 QQBOT_CHANNEL=qqbot
 EDGE_TTS_PROXY_URL=http://127.0.0.1:18792/v1
 EDGE_TTS_DEFAULT_VOICE=zh-CN-XiaoxiaoNeural
@@ -455,10 +486,11 @@ EOENV
     install_openclaw_wrapper
     validate_openclaw_runtime
     install_weixin_plugin_for_user
+    install_qqbot_plugin_for_user
 
     cat >"${OPENCLAW_HOME}/plugin-status.txt" <<'EOSTATUS'
 weixin=installed package=@tencent-weixin/openclaw-weixin
-qqbot=bundled package=qqbot
+qqbot=installed package=@tencent-connect/openclaw-qqbot@latest builtin=disabled
 EOSTATUS
 
     chown -R "${BUILD_USER}:${BUILD_USER}" "${OPENCLAW_HOME}"

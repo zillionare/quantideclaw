@@ -44,8 +44,9 @@ LOG_FILE = Path("/var/lib/quantideclaw-onboard/setup.log")
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_THRESHOLD = int(dt.datetime(2025, 10, 1, tzinfo=dt.timezone.utc).timestamp())
-WELCOME_MESSAGE = "配置完成，欢迎使用。"
+WELCOME_MESSAGE = "你好， Quantide Claw 欢迎你！"
 OPENCLAW_WRAPPER = Path("/usr/local/bin/quantideclaw-openclaw")
+DEFAULT_CONTROL_UI_URL = "http://127.0.0.1:18789/"
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 SHELL_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 REQUEST_ID_RE = re.compile(
@@ -87,6 +88,53 @@ def deep_merge_dict(base: dict[str, object], updates: dict[str, object]) -> dict
         else:
             merged[key] = value
     return merged
+
+
+def migrate_openclaw_config_schema(config: dict[str, object]) -> dict[str, object]:
+    migrated = dict(config)
+    migrated.pop("profile", None)
+
+    messages = migrated.get("messages")
+    if isinstance(messages, dict):
+        tts = messages.get("tts")
+        if isinstance(tts, dict):
+            providers = tts.get("providers")
+            if not isinstance(providers, dict):
+                providers = {}
+            for provider_name in ("openai", "elevenlabs", "microsoft", "edge"):
+                provider_config = tts.pop(provider_name, None)
+                if isinstance(provider_config, dict) and provider_name not in providers:
+                    providers[provider_name] = provider_config
+            if providers:
+                tts["providers"] = providers
+
+    agents = migrated.get("agents")
+    if isinstance(agents, dict):
+        defaults = agents.get("defaults")
+        if isinstance(defaults, dict):
+            defaults.pop("tools", None)
+
+        list_entries = agents.get("list")
+        if isinstance(list_entries, list):
+            normalized_list: list[dict[str, object]] = []
+            for index, entry in enumerate(list_entries):
+                if not isinstance(entry, dict):
+                    continue
+                normalized_entry = dict(entry)
+                entry_tools = normalized_entry.get("tools")
+                if isinstance(entry_tools, dict):
+                    entry_tools.pop("browser", None)
+                    if entry_tools:
+                        normalized_entry["tools"] = entry_tools
+                    else:
+                        normalized_entry.pop("tools", None)
+                fallback_id = "main" if index == 0 else f"agent-{index + 1}"
+                entry_id = str(normalized_entry.get("id") or normalized_entry.get("name") or fallback_id).strip()
+                normalized_entry["id"] = entry_id or fallback_id
+                normalized_list.append(normalized_entry)
+            agents["list"] = normalized_list
+
+    return migrated
 
 
 def parse_number(value: object) -> float | None:
@@ -237,9 +285,11 @@ class FirstBootApp:
         self.paired_devices: list[dict[str, str]] = []
         self.pairing_status = tk.StringVar(value="请点击下方按钮刷新配对状态。")
         self.pairing_runtime_signature: str | None = None
+        self.setup_completed_signature: str | None = None
         self.images: dict[str, object] = {}
         self.openrouter_step_index = 2
         self.channel_step_index = 3
+        self.verification_step_index = 4
         self.weixin_qr_url: str | None = None
         self.weixin_login_requested = False
         self.weixin_login_in_progress = False
@@ -259,8 +309,7 @@ class FirstBootApp:
             {"title": "基础信息", "build": self._build_basic_step},
             {"title": "配置 OpenRouter", "build": self._build_openrouter_step},
             {"title": "渠道接入", "build": self._build_channel_step},
-            {"title": "设备配对审批", "build": self._build_pairing_step},
-            {"title": "执行", "build": self._build_execute_step},
+            {"title": "验证", "build": self._build_verification_step},
         ]
 
         self._build_ui()
@@ -388,30 +437,38 @@ class FirstBootApp:
             self.next_btn.configure(text="下一步", command=self._next_step)
         elif step_idx == len(self.steps) - 1:
             self.prev_btn.state(["!disabled"])
-            self.next_btn.configure(text="退出", command=self.root.destroy)
+            self.next_btn.state(["!disabled"])
+            self.next_btn.configure(text="完成", command=self.complete_setup)
         else:
             self.prev_btn.state(["!disabled"])
             self.next_btn.state(["!disabled"])
             self.next_btn.configure(text="下一步", command=self._next_step)
         self._refresh_next_button_state()
         self.root.update_idletasks()
-        if (
-            step_idx == self.channel_step_index
-            and self.install_weixin.get()
-            and not self.weixin_login_requested
-            and not self.weixin_login_in_progress
-        ):
-            self.root.after(150, self._do_weixin_login)
+        if step_idx == self.channel_step_index:
+            self.root.after(150, self._maybe_start_weixin_login)
+
+    def _maybe_start_weixin_login(self) -> None:
+        if self.current_step != self.channel_step_index:
+            return
+        if not self.install_weixin.get():
+            return
+        if self.weixin_login_requested or self.weixin_login_in_progress:
+            return
+        self._do_weixin_login()
 
     def _next_step(self):
-        if self.current_step < len(self.steps) - 1:
-            if self.current_step == self.openrouter_step_index and self.model_id.get().strip():
-                self._cancel_model_query("已选择可用模型，停止其余模型验证并进入下一步。")
-            if self.current_step == 3 and self.install_weixin.get() and not self.weixin_login_requested:
-                messagebox.showerror("请先获取二维码", "请先在当前页面获取微信登录二维码，并完成扫码。")
-                return
-            # Add validation logic here before proceeding if needed
-            self._show_step(self.current_step + 1)
+        if self.current_step >= len(self.steps) - 1:
+            return
+        if self.current_step == self.openrouter_step_index and self.model_id.get().strip():
+            self._cancel_model_query("已选择可用模型，停止其余模型验证并进入下一步。")
+        if self.current_step == self.channel_step_index and self.install_weixin.get() and not self.weixin_login_requested:
+            messagebox.showerror("请先获取二维码", "请先在当前页面获取微信登录二维码，并完成扫码。")
+            return
+        if self.current_step == self.channel_step_index:
+            self.run_setup()
+            return
+        self._show_step(self.current_step + 1)
 
     def _refresh_next_button_state(self) -> None:
         if not hasattr(self, "next_btn"):
@@ -1076,9 +1133,6 @@ class FirstBootApp:
         self.weixin_qr_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
         self.weixin_qr_frame.pack_propagate(False)
 
-        # Load QR code immediately
-        self._do_weixin_login()
-
         # Right: Info text
         wechat_info = tk.Frame(self.weixin_content, bg="#f8f9fa")
         wechat_info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1123,20 +1177,33 @@ class FirstBootApp:
 
     def _toggle_weixin_widgets(self) -> None:
         """Enable/disable WeChat widgets based on checkbox state."""
-        if hasattr(self, 'weixin_content'):
-            state = tk.NORMAL if self.install_weixin.get() else tk.DISABLED
-            for widget in self.weixin_content.winfo_children():
+        if not hasattr(self, "weixin_content"):
+            return
+
+        enabled = self.install_weixin.get()
+        if not enabled:
+            self.weixin_login_generation += 1
+            self.weixin_login_in_progress = False
+            self.weixin_login_requested = False
+            self.weixin_qr_url = None
+            self._stop_weixin_login_process("已停用微信渠道，停止二维码获取。")
+
+        state = tk.NORMAL if enabled else tk.DISABLED
+        for widget in self.weixin_content.winfo_children():
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                # Some widgets don't support state
+                pass
+            # Recursively set state for child widgets
+            for child in widget.winfo_children():
                 try:
-                    widget.configure(state=state)
+                    child.configure(state=state)
                 except tk.TclError:
-                    # Some widgets don't support state
                     pass
-                # Recursively set state for child widgets
-                for child in widget.winfo_children():
-                    try:
-                        child.configure(state=state)
-                    except tk.TclError:
-                        pass
+
+        if enabled and self.current_step == self.channel_step_index:
+            self.root.after(0, self._maybe_start_weixin_login)
 
     def _close_app(self) -> None:
         self._stop_weixin_login_process()
@@ -1144,6 +1211,67 @@ class FirstBootApp:
             self.root.destroy()
         except tk.TclError:
             pass
+
+    def _write_completion_marker(self) -> None:
+        try:
+            if self.preview:
+                self.append_log("[PREVIEW] 跳过写入 completed marker")
+                return
+            MARKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MARKER_FILE.write_text("completed\n", encoding="utf-8")
+        except PermissionError:
+            pass
+
+    def _resolve_control_console_url(self) -> str:
+        url = DEFAULT_CONTROL_UI_URL
+        host = "127.0.0.1"
+        port = 18789
+        base_path = "/"
+        try:
+            if self.config_path.exists():
+                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    gateway = loaded.get("gateway")
+                    if isinstance(gateway, dict):
+                        raw_port = gateway.get("port")
+                        if isinstance(raw_port, int):
+                            port = raw_port
+                        elif isinstance(raw_port, str) and raw_port.strip().isdigit():
+                            port = int(raw_port.strip())
+                        control_ui = gateway.get("controlUi")
+                        if isinstance(control_ui, dict):
+                            raw_base_path = str(control_ui.get("basePath") or "").strip()
+                            if raw_base_path:
+                                cleaned = "/" + raw_base_path.strip("/")
+                                base_path = f"{cleaned}/"
+            url = f"http://{host}:{port}{base_path}"
+        except Exception:
+            pass
+        return url
+
+    def _open_control_console(self) -> None:
+        import shutil
+        import subprocess
+
+        url = self._resolve_control_console_url()
+        browsers = ["firefox", "chromium", "chromium-browser", "google-chrome", "xdg-open"]
+        for browser in browsers:
+            if shutil.which(browser):
+                try:
+                    subprocess.Popen([browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+                except Exception:
+                    continue
+        try:
+            webbrowser.open(url)
+        except Exception:
+            print(f"[LOG] 无法自动打开控制台，请手动访问: {url}")
+
+    def complete_setup(self) -> None:
+        self._write_completion_marker()
+        self._close_app()
+        if not self.preview:
+            self._open_control_console()
 
     def _build_command_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -1529,7 +1657,7 @@ class FirstBootApp:
 
         tk.Label(
             help_frame,
-            text="需要先在 ",
+            text="需要在 ",
             font=("Noto Sans CJK SC", 10),
             bg="#f8f9fa",
             fg="#888888",
@@ -1548,7 +1676,7 @@ class FirstBootApp:
 
         tk.Label(
             help_frame,
-            text=" 创建 Bot 获取 App ID 和 Secret。",
+            text=" 创建 Bot，获取 AppID 和 Secret，并扫描该机器人的二维码添加为好友",
             font=("Noto Sans CJK SC", 10),
             bg="#f8f9fa",
             fg="#888888",
@@ -1814,41 +1942,55 @@ class FirstBootApp:
             "3. openclaw 服务是否正常运行"
         )
 
-    def _build_execute_step(self, parent):
-        tk.Frame(parent, height=10).pack()
+    def _build_verification_step(self, parent):
+        tk.Frame(parent, height=10, bg="#ffffff").pack()
 
         frame = tk.Frame(parent, bg="#ffffff")
         frame.pack(fill=tk.BOTH, expand=True, padx=20)
 
-        action_frame = tk.Frame(frame, bg="#ffffff")
-        action_frame.pack(fill=tk.X, pady=(0, 15))
-
-        self.start_button = tk.Button(
-            action_frame,
-            text="开始" + ("预览" if self.preview else "初始化"),
-            command=self.run_setup,
-            bg="#e41815",
-            fg="white",
-            font=("Noto Sans CJK SC", 12, "bold"),
-            padx=20,
-            pady=8
-        )
-        self.start_button.pack(side=tk.LEFT)
-
         tk.Label(
-            action_frame,
-            text="点击开始执行安装。请不要在此过程中关闭程序。",
-            fg="#666",
+            frame,
+            text="验证",
+            font=("Noto Sans CJK SC", 16, "bold"),
             bg="#ffffff",
             relief=tk.FLAT,
-        ).pack(side=tk.LEFT, padx=(15, 0))
+        ).pack(anchor=tk.W, pady=(0, 18))
 
-        log_frame = ttk.LabelFrame(frame, text="执行日志", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True)
+        card = tk.Frame(frame, bg="#f8f9fa", padx=24, pady=24)
+        card.pack(fill=tk.X, anchor=tk.NW)
 
-        self.log = scrolledtext.ScrolledText(log_frame, font=("Monospace", 10), bg="#1e1e1e", fg="#e0e0e0")
-        self.log.pack(fill=tk.BOTH, expand=True)
-        self.log.configure(state=tk.DISABLED)
+        tk.Label(
+            card,
+            text="这一屏都是提示信息。",
+            font=("Noto Sans CJK SC", 13, "bold"),
+            bg="#f8f9fa",
+            fg="#1f1f1f",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+
+        tk.Label(
+            card,
+            text=(
+                "我刚刚往你配置的渠道发送了一条『你好， Quantide Claw 欢迎你！』的消息，"
+                "请在微信或 QQ 上面接收。\n\n"
+                "如果收到，说明配置全部成功完成，你可以正常使用啦！\n\n"
+                "如果没有收到，请重试。"
+            ),
+            wraplength=760,
+            justify=tk.LEFT,
+            font=("Noto Sans CJK SC", 12),
+            bg="#f8f9fa",
+            fg="#333333",
+        ).pack(anchor=tk.W, pady=(16, 0))
+
+        tk.Label(
+            frame,
+            text="点击右下角“完成”后，将关闭当前对话框并打开 OpenClaw 控制台。",
+            font=("Noto Sans CJK SC", 10),
+            bg="#ffffff",
+            fg="#666666",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(18, 0))
 
     def _sync_scroll_region(self, _event: tk.Event[tk.Misc]) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -2472,22 +2614,22 @@ class FirstBootApp:
         if self.preview:
             self.append_log(
                 f"[PREVIEW] 写入配置文件: user_name={user_name}, agent_name={agent_name}, "
-                f"model_id={model_id}, browser_profile=user, "
+                f"model_id={model_id}, agent_id=main, "
                 f"key={key[:4]}...{key[-4:] if len(key)>8 else ''}"
             )
             return
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        browser_tools = {"browser": {"profile": "user"}}
         existing_config: dict[str, object] = {}
         if self.config_path.exists():
             try:
                 loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
-                    existing_config = loaded
+                    existing_config = migrate_openclaw_config_schema(loaded)
             except (OSError, json.JSONDecodeError):
                 self.append_log("WARN: 现有 openclaw.json 无法解析，将覆盖为新的向导配置。")
 
+        normalized_model_id = normalize_model_id(model_id)
         managed_config: dict[str, object] = {
             "env": {"OPENROUTER_API_KEY": key},
             "tools": {
@@ -2501,44 +2643,50 @@ class FirstBootApp:
                     "auto": "always",
                     "mode": "final",
                     "provider": "openai",
-                    "openai": {
-                        "baseUrl": self.proxy_url,
-                        "apiKey": "edge-tts-local",
-                        "model": "edge-tts",
-                        "voice": self.proxy_voice,
+                    "providers": {
+                        "openai": {
+                            "baseUrl": self.proxy_url,
+                            "apiKey": "edge-tts-local",
+                            "model": "edge-tts",
+                            "voice": self.proxy_voice,
+                        }
                     },
                 }
             },
             "agents": {
                 "defaults": {
                     "workspace": str(self.workspace_dir),
-                    "model": normalize_model_id(model_id),
-                    "tools": browser_tools,
+                    "model": normalized_model_id,
                 },
                 "list": [
                     {
-                        "name": "main",
+                        "id": "main",
                         "default": True,
                         "workspace": str(self.workspace_dir),
-                        "model": normalize_model_id(model_id),
-                        "tools": browser_tools,
+                        "model": normalized_model_id,
                         "identity": {"name": agent_name},
                     }
                 ],
             },
-            "profile": {"user": {"name": user_name}},
         }
         config = deep_merge_dict(existing_config, managed_config)
+        config = migrate_openclaw_config_schema(config)
         plugins_config = config.get("plugins")
         if not isinstance(plugins_config, dict):
             plugins_config = {}
+
+        allow_list = plugins_config.get("allow")
+        if not isinstance(allow_list, list):
+            allow_list = []
+        allow_list = [
+            item for item in allow_list
+            if item not in {"openclaw-weixin", self.qq_channel}
+        ]
         if self.install_weixin.get():
-            allow_list = plugins_config.get("allow")
-            if not isinstance(allow_list, list):
-                allow_list = []
-            if "openclaw-weixin" not in allow_list:
-                allow_list.append("openclaw-weixin")
-            plugins_config["allow"] = allow_list
+            allow_list.append("openclaw-weixin")
+        if self.install_qqbot.get():
+            allow_list.append(self.qq_channel)
+        plugins_config["allow"] = allow_list
         config["plugins"] = plugins_config
         self.config_path.write_text(
             json.dumps(config, ensure_ascii=False, indent=2) + "\n",
@@ -2574,6 +2722,13 @@ class FirstBootApp:
         user_name = self.user_name.get().strip()
         model_id = self.model_id.get().strip()
         openrouter_key = self.openrouter_key.get().strip()
+
+        if not self.install_weixin.get():
+            self.weixin_login_generation += 1
+            self.weixin_login_in_progress = False
+            self.weixin_login_requested = False
+            self.weixin_qr_url = None
+            self._stop_weixin_login_process("检测到微信渠道未启用，停止二维码获取。")
 
         self.append_log(">>> 先同步当前配置并准备配对运行环境")
         self.write_workspace_files(user_name, agent_name)
@@ -2906,7 +3061,7 @@ class FirstBootApp:
         ).pack(anchor=tk.W)
         ttk.Label(
             frame,
-            text="添加完成后重新运行 /usr/local/bin/quantideclaw-onboard，即可再次走完审批与欢迎消息流程。",
+            text="添加完成后重新运行 /usr/local/bin/quantideclaw-onboard，即可再次尝试发送欢迎消息。",
             wraplength=460,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(8, 12))
@@ -2943,48 +3098,33 @@ class FirstBootApp:
         raise RuntimeError("QuantideClaw gateway 未能在预期时间内启动。")
 
     def run_setup(self) -> None:
+        signature = self._pairing_runtime_state_signature()
+
+        self.prev_btn.state(["disabled"])
+        self.next_btn.state(["disabled"])
+        self.root.update_idletasks()
+
         try:
             self.validate_inputs()
-            confirmed = messagebox.askyesno(
-                "确认初始化" + (" [预览模式]" if self.preview else ""),
-                "确认开始初始化？\n\n"
-                "1. 写入 QuantideClaw 本地配置\n"
-                "2. 配置微信或 QQ Bot 渠道\n"
-                "3. 检查设备配对状态（如有待审批请求，请先在上一页审批）\n"
-                "4. 发送欢迎消息\n\n"
-                "只有欢迎消息发送成功后，才会写入完成标记。"
-                + ("\n\n注意：当前处于预览模式，所有操作仅打印日志不实际执行！" if self.preview else ""),
-            )
-            if not confirmed:
-                return
-
-            self.start_button.configure(state=tk.DISABLED)
             self.execute_setup()
         except WelcomeMessagePending as exc:
+            self.setup_completed_signature = None
             self.append_log(f"INFO: {exc}")
+            messagebox.showwarning("欢迎消息未送达", str(exc))
         except Exception as exc:
+            self.setup_completed_signature = None
             self.append_log(f"ERROR: {exc}")
             messagebox.showerror("初始化失败", str(exc))
         else:
-            try:
-                if self.preview:
-                    self.append_log("[PREVIEW] 写入 completed marker")
-                else:
-                    MARKER_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    MARKER_FILE.write_text("completed\n", encoding="utf-8")
-            except PermissionError:
-                pass
-            messagebox.showinfo(
-                "初始化完成" + (" (预览模式)" if self.preview else ""),
-                "QuantideClaw 初始化已完成。后续会自动拉起 gateway 与 Edge-TTS 代理。",
-            )
-            self._close_app()
+            self.setup_completed_signature = signature
+            self._show_step(self.verification_step_index)
         finally:
-            if hasattr(self, "start_button") and self.start_button.winfo_exists():
-                try:
-                    self.start_button.configure(state=tk.NORMAL)
-                except tk.TclError:
-                    pass
+            if self.current_step != self.verification_step_index:
+                if self.current_step == 0:
+                    self.prev_btn.state(["disabled"])
+                else:
+                    self.prev_btn.state(["!disabled"])
+                self._refresh_next_button_state()
 
     def execute_setup(self) -> None:
         self.append_log("=" * 64)
@@ -2995,18 +3135,8 @@ class FirstBootApp:
         self.append_log("=" * 64)
 
         self._ensure_pairing_runtime_ready()
-        self.refresh_pairings(prepare_runtime=False)
-
-        if self.pending_requests:
-            pending_preview = "，".join(item["id"] for item in self.pending_requests[:3])
-            if len(self.pending_requests) > 3:
-                pending_preview += "……"
-            raise RuntimeError(
-                f"仍有 {len(self.pending_requests)} 个待审批配对请求，请先回到“设备配对审批”页完成审批：{pending_preview}"
-            )
-
         self.run_command(
-            "配对后再次重启 gateway",
+            "最终重启 gateway",
             "/usr/local/bin/quantideclaw-session-start --restart-gateway",
         )
         self.wait_for_gateway()
@@ -3019,7 +3149,7 @@ class FirstBootApp:
 
         if not delivered:
             self.show_support_dialog()
-            raise WelcomeMessagePending("欢迎消息发送失败，已展示微信兜底二维码。")
+            raise WelcomeMessagePending("欢迎消息发送失败，请回到上一页确认渠道配置后重试。")
 
         self.append_log("=" * 64)
         self.append_log("初始化流程执行完成")
