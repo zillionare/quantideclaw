@@ -129,6 +129,6 @@ reboot
 ## 补充说明
 
 - 两个阶段结束时都会执行安全清理，但不会进行磁盘 0 填充。
-- `build-utm.sh` 与 `build-wsl2.bat` 仅保留为旧流程参考，不再作为主线构建入口。
+- `build-wsl2.bat` 仅保留为旧流程参考，不再作为主线构建入口。
 - 宿主机剪贴板文本粘贴依赖 UTM 侧提供 SPICE/clipboard 集成；第一阶段会在 guest 内安装并启动 `spice-vdagent`。
 - 技术细节请查看 `spec.md`。
