@@ -128,3 +128,9 @@ phase_cleanup_remote_stage() {
     phase_log_info "Cleaning temporary remote directory ${remote_stage_dir}"
     phase_ssh "rm -rf $(phase_shell_quote "${remote_stage_dir}")" >/dev/null || true
 }
+
+phase_reboot_guest() {
+    phase_log_info "Rebooting guest VM (${SSH_USER}@${VM_HOST})..."
+    phase_ssh "sudo reboot" >/dev/null 2>&1 || true
+    phase_log_info "Reboot command sent. Guest VM is restarting."
+}

@@ -360,60 +360,23 @@ install_weixin_plugin_for_user() {
     if ! runuser -u "${BUILD_USER}" -- /bin/bash -c '
         set -euo pipefail
         plugin_root="/home/'"${BUILD_USER}"'/.openclaw"
-        plugin_package="${WEIXIN_PLUGIN_PACKAGE:-@tencent-weixin/openclaw-weixin}"
         install_log="$(mktemp)"
         mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
 
-        if [[ -d "$plugin_root/extensions/openclaw-weixin" ]]; then
-            echo "[INFO] Weixin plugin already present at $plugin_root/extensions/openclaw-weixin, skipping reinstall." >&2
-            rm -f "$install_log"
-            exit 0
+        local_package=$(ls /opt/quantideclaw-onboard/assets/tencent-weixin-openclaw-weixin-*.tgz 2>/dev/null | head -1)
+        if [[ -z "$local_package" ]]; then
+            echo "[ERROR] Weixin plugin package not found in /opt/quantideclaw-onboard/assets/" >&2
+            exit 1
         fi
 
-        # Check for local package tarball first (hardcoded fallback paths)
-        local_package=""
-        for dir in /opt/quantideclaw-onboard/assets /root/assets /root; do
-            candidate=$(ls "$dir"/tencent-weixin-openclaw-weixin-*.tgz 2>/dev/null | head -1) || continue
-            if [[ -n "$candidate" ]]; then
-                local_package="$candidate"
-                break
-            fi
-        done
-
-        if [[ -n "$local_package" ]]; then
-            echo "[INFO] Installing weixin plugin from local package: $local_package" >&2
-            rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
-            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1; then
-                cat "$install_log"
-                rm -f "$install_log"
-                exit 0
-            fi
-            cat "$install_log" >&2
-            echo "[WARN] Local weixin package install failed, trying remote..." >&2
-        fi
-
-        for attempt in 1 2 3 4 5; do
-            rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
-            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$plugin_package" >"$install_log" 2>&1; then
-                cat "$install_log"
-                rm -f "$install_log"
-                exit 0
-            fi
-
-            cat "$install_log" >&2
-            if grep -Eiq "rate.?limit|too many requests|429" "$install_log" && [[ "$attempt" -lt 5 ]]; then
-                sleep_seconds=$((attempt * 60))
-                echo "[WARN] Weixin plugin install hit rate limit, retrying in ${sleep_seconds}s..." >&2
-                sleep "$sleep_seconds"
-                continue
-            fi
-        done
-        echo "[WARN] Weixin plugin install failed after multiple attempts, continuing with the rest of the setup..." >&2
-        # Do not exit with error, allow script to continue
+        echo "[INFO] Installing weixin plugin from: $local_package" >&2
+        rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
+        OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
+            /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1
+        cat "$install_log"
         rm -f "$install_log"
-        exit 0
     '; then
-        log_warn "Weixin plugin setup returned non-zero unexpectedly, continuing with the rest of the setup..."
+        log_error "Weixin plugin installation failed"
     fi
 }
 
@@ -421,63 +384,25 @@ install_qqbot_plugin_for_user() {
     if ! runuser -u "${BUILD_USER}" -- /bin/bash -c '
         set -euo pipefail
         plugin_root="/home/'"${BUILD_USER}"'/.openclaw"
-        plugin_package="${QQBOT_PLUGIN_PACKAGE:-@tencent-connect/openclaw-qqbot@latest}"
         install_log="$(mktemp)"
         mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
 
-        if [[ -d "$plugin_root/extensions/openclaw-qqbot" ]]; then
-            OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot >/dev/null 2>&1 || true
-            echo "[INFO] QQBot plugin already present at $plugin_root/extensions/openclaw-qqbot, skipping reinstall." >&2
-            rm -f "$install_log"
-            exit 0
+        local_package=$(ls /opt/quantideclaw-onboard/assets/tencent-connect-openclaw-qqbot-*.tgz 2>/dev/null | head -1)
+        if [[ -z "$local_package" ]]; then
+            echo "[ERROR] QQBot plugin package not found in /opt/quantideclaw-onboard/assets/" >&2
+            exit 1
         fi
 
-        # Check for local package tarball first (hardcoded fallback paths)
-        local_package=""
-        for dir in /opt/quantideclaw-onboard/assets /root/assets /root; do
-            candidate=$(ls "$dir"/tencent-connect-openclaw-qqbot-*.tgz 2>/dev/null | head -1) || continue
-            if [[ -n "$candidate" ]]; then
-                local_package="$candidate"
-                break
-            fi
-        done
-
-        if [[ -n "$local_package" ]]; then
-            echo "[INFO] Installing qqbot plugin from local package: $local_package" >&2
-            rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
-            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1; then
-                cat "$install_log"
-                OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
-                rm -f "$install_log"
-                exit 0
-            fi
-            cat "$install_log" >&2
-            echo "[WARN] Local qqbot package install failed, trying remote..." >&2
-        fi
-
-        for attempt in 1 2 3 4 5; do
-            rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
-            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$plugin_package" >"$install_log" 2>&1; then
-                cat "$install_log"
-                OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
-                rm -f "$install_log"
-                exit 0
-            fi
-
-            cat "$install_log" >&2
-            if grep -Eiq "rate.?limit|too many requests|429" "$install_log" && [[ "$attempt" -lt 5 ]]; then
-                sleep_seconds=$((attempt * 60))
-                echo "[WARN] QQBot plugin install hit rate limit, retrying in ${sleep_seconds}s..." >&2
-                sleep "$sleep_seconds"
-                continue
-            fi
-        done
-        echo "[WARN] QQBot plugin install failed after multiple attempts, continuing with the rest of the setup..." >&2
-        # Do not exit with error, allow script to continue
+        echo "[INFO] Installing qqbot plugin from: $local_package" >&2
+        rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
+        OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
+            /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1
+        cat "$install_log"
+        OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
+            /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
         rm -f "$install_log"
-        exit 0
     '; then
-        log_warn "QQBot plugin setup returned non-zero unexpectedly, continuing with the rest of the setup..."
+        log_error "QQBot plugin installation failed"
     fi
 }
 
@@ -707,6 +632,8 @@ host_main() {
         "guest/assets/edge_tts_proxy.py"
         "guest/assets/openrouter.jpg"
         "guest/assets/quantfans.png"
+        "guest/assets/tencent-weixin-openclaw-weixin-2.1.7.tgz"
+        "guest/assets/tencent-connect-openclaw-qqbot-1.7.1.tgz"
     )
 
     phase_require_host_tools
@@ -732,6 +659,8 @@ EOF
         "TARGET_ARCH=${TARGET_ARCH}" \
         "RUN_CLEANUP=${RUN_CLEANUP}"
     phase_cleanup_remote_stage "${REMOTE_STAGE_DIR}"
+
+    phase_reboot_guest
 
     log_info "Stage 2 complete."
     log_info "Reboot the VM and verify onboard.py launches only on first login."

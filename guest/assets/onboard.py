@@ -316,19 +316,19 @@ class FirstBootApp:
         self.pairing_status = tk.StringVar(value="请点击下方按钮刷新配对状态。")
         self.pairing_runtime_signature: str | None = None
         self.setup_completed_signature: str | None = None
-        self.verification_status = tk.StringVar(value="下一步将发送验证消息，并等待你的回执。")
+        self.verification_status = tk.StringVar(value="请通过微信或QQ发送任意消息，我将检测 OpenClaw 的回复。")
         self.verification_reply_confirmed = False
         self.verification_in_progress = False
         self.verification_started_signature: str | None = None
         self.verification_poll_after_id: str | None = None
         self.verification_channels: dict[str, dict[str, object]] = {}
         self.verification_send_status_vars = {
-            self.weixin_channel: tk.StringVar(value="验证消息：待发送"),
-            self.qq_channel: tk.StringVar(value="验证消息：待发送"),
+            self.weixin_channel: tk.StringVar(value="等待用户发送消息"),
+            self.qq_channel: tk.StringVar(value="等待用户发送消息"),
         }
         self.verification_reply_status_vars = {
-            self.weixin_channel: tk.StringVar(value="回执：尚未收到"),
-            self.qq_channel: tk.StringVar(value="回执：尚未收到"),
+            self.weixin_channel: tk.StringVar(value="回复：尚未收到"),
+            self.qq_channel: tk.StringVar(value="回复：尚未收到"),
         }
         self.images: dict[str, object] = {}
         self.log = None
@@ -610,7 +610,7 @@ class FirstBootApp:
 
         tk.Label(
             desc_frame,
-            text="QuantideClaw 每天请求超过 1 亿 token，费用非常惊人！不过，好在我们可以使用 OpenRouter 上的免费模型，从而实现免费养虾！现在我们就开始配置！",
+            text="OpenClaw 重度使用时，每天请求可能超 1 亿 token，费用非常惊人！不过，好在我们可以使用 OpenRouter 上的免费模型，从而实现免费养虾！现在我们就开始配置！",
             wraplength=700,
             justify=tk.LEFT,
             font=("Noto Sans CJK SC", 13),
@@ -1323,7 +1323,7 @@ class FirstBootApp:
 
     def complete_setup(self) -> None:
         if self.current_step == self.verification_step_index and not self.verification_reply_confirmed:
-            messagebox.showerror("请先完成双向验证", "请先在任一已启用渠道回复任意一句话，并等待向导显示回执。")
+            messagebox.showerror("请先完成连接验证", "请先通过微信或QQ发送任意消息给 OpenClaw，并等待向导检测到回复。")
             return
         self._write_completion_marker()
         self._close_app()
@@ -2018,7 +2018,7 @@ class FirstBootApp:
 
         tk.Label(
             card,
-            text="双向验证",
+            text="连接验证",
             font=("Noto Sans CJK SC", 13, "bold"),
             bg="#f8f9fa",
             fg="#1f1f1f",
@@ -2085,38 +2085,7 @@ class FirstBootApp:
                 justify=tk.LEFT,
             ).pack(anchor=tk.W)
 
-        action_row = tk.Frame(frame, bg="#ffffff")
-        action_row.pack(fill=tk.X, pady=(6, 12))
 
-        self.verification_resend_button = tk.Button(
-            action_row,
-            text="重新发送验证消息",
-            command=self.retry_verification,
-            bg="#ffffff",
-            fg="#1f2937",
-            font=("Noto Sans CJK SC", 11, "bold"),
-            relief=tk.SOLID,
-            bd=1,
-            padx=14,
-            pady=6,
-            cursor="hand2",
-        )
-        self.verification_resend_button.pack(side=tk.LEFT)
-
-        self.verification_refresh_button = tk.Button(
-            action_row,
-            text="立即检查回执",
-            command=self.check_verification_replies_now,
-            bg="#ffffff",
-            fg="#1f2937",
-            font=("Noto Sans CJK SC", 11),
-            relief=tk.SOLID,
-            bd=1,
-            padx=14,
-            pady=6,
-            cursor="hand2",
-        )
-        self.verification_refresh_button.pack(side=tk.LEFT, padx=(10, 0))
 
         log_card = tk.Frame(frame, bg="#f8f9fa", padx=16, pady=16)
         log_card.pack(fill=tk.BOTH, expand=True)
@@ -2136,8 +2105,8 @@ class FirstBootApp:
         tk.Label(
             frame,
             text=(
-                "进入本页后会自动发送验证消息。请在任一已启用渠道回复任意一句话，"
-                "向导检测到回执后才会放开右下角“完成”按钮。"
+                "请通过已启用的渠道（微信或QQ）发送任意消息给 OpenClaw。"
+                "向导会自动检测 OpenClaw 的回复，确认连接正常后放开右下角“完成”按钮。"
             ),
             font=("Noto Sans CJK SC", 10),
             bg="#ffffff",
@@ -2172,11 +2141,11 @@ class FirstBootApp:
         selected = {channel for channel, _ in self._selected_verification_channels()}
         for channel in (self.weixin_channel, self.qq_channel):
             if channel in selected:
-                self.verification_send_status_vars[channel].set("验证消息：待发送")
-                self.verification_reply_status_vars[channel].set("回执：尚未收到")
+                self.verification_send_status_vars[channel].set("等待用户发送消息")
+                self.verification_reply_status_vars[channel].set("回复：尚未收到")
             else:
-                self.verification_send_status_vars[channel].set("验证消息：未启用")
-                self.verification_reply_status_vars[channel].set("回执：未启用")
+                self.verification_send_status_vars[channel].set("未启用")
+                self.verification_reply_status_vars[channel].set("未启用")
         self._refresh_next_button_state()
 
     def _cancel_verification_polling(self) -> None:
@@ -2191,10 +2160,6 @@ class FirstBootApp:
 
     def _set_verification_busy(self, busy: bool) -> None:
         self.verification_in_progress = busy
-        if self._widget_exists(getattr(self, "verification_resend_button", None)):
-            self.verification_resend_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
-        if self._widget_exists(getattr(self, "verification_refresh_button", None)):
-            self.verification_refresh_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
 
     def _maybe_start_verification_after_step_render(self) -> None:
         if self.current_step != self.verification_step_index:
@@ -2207,19 +2172,6 @@ class FirstBootApp:
             return
         self._start_verification_flow(force_resend=False)
 
-    def retry_verification(self) -> None:
-        if self.verification_in_progress:
-            return
-        self.verification_started_signature = None
-        self._reset_verification_state("正在重新发送验证消息…")
-        self._start_verification_flow(force_resend=True)
-
-    def check_verification_replies_now(self) -> None:
-        if self.current_step != self.verification_step_index:
-            return
-        self.verification_status.set("正在检查最新回执…")
-        self._poll_verification_replies(notify_waiting=True)
-
     def _start_verification_flow(self, *, force_resend: bool) -> None:
         if self.current_step != self.verification_step_index:
             return
@@ -2229,39 +2181,45 @@ class FirstBootApp:
             return
         self.verification_started_signature = signature
         self._set_verification_busy(True)
-        self.verification_status.set("正在准备发送验证消息…")
+        self.verification_status.set("正在检测连接状态…")
         self.root.after(50, self._execute_verification_flow)
 
     def _execute_verification_flow(self) -> None:
-        delivered = False
         try:
-            delivered = self.execute_setup()
+            self._ensure_pairing_runtime_ready()
+            self._init_verification_channels_for_polling()
+            self.append_log("=" * 64)
+            self.append_log("开始连接验证流程")
+            self.append_log("等待用户通过微信或QQ发送消息...")
+            self.append_log("=" * 64)
+            self.verification_status.set("请通过微信或QQ发送任意消息给 OpenClaw，我将自动检测回复。")
+            self._poll_verification_replies(notify_waiting=False)
         except Exception as exc:
             self.setup_completed_signature = None
             self.verification_status.set(f"初始化失败: {exc}")
             self.append_log(f"ERROR: {exc}")
             messagebox.showerror("初始化失败", str(exc))
-        else:
-            signature = self._pairing_runtime_state_signature()
-            self.setup_completed_signature = signature if delivered else None
-            if delivered and self._has_pending_weixin_context():
-                self.verification_status.set(
-                    "QQ 验证消息已发送；微信还需要你先主动发一条消息完成会话预热，向导检测到后会自动补发。"
-                )
-                self._poll_verification_replies(notify_waiting=False)
-            elif delivered:
-                self.verification_status.set("验证消息已发送。请在任一已启用渠道回复任意一句话，向导会自动检查回执。")
-                self._poll_verification_replies(notify_waiting=False)
-            elif self._has_pending_weixin_context():
-                self.verification_status.set(
-                    "微信还没有建立会话上下文。请先在微信里主动发一条消息，向导检测到后会自动补发验证消息。"
-                )
-                self._poll_verification_replies(notify_waiting=False)
-            else:
-                self.verification_status.set("验证消息还没有发出去，请检查上面的状态，修正后再重试。")
         finally:
             self._set_verification_busy(False)
             self._refresh_next_button_state()
+
+
+    def _init_verification_channels_for_polling(self) -> None:
+        for channel, display_name in self._selected_verification_channels():
+            target = self._resolve_welcome_target(channel)
+            if not target:
+                self.append_log(f"WARN: 无法确定 {channel} ({display_name}) 的目标用户")
+                continue
+            session_marker = self._verification_session_marker(channel, target)
+            self.verification_channels[channel] = {
+                "target": target,
+                "session_marker": session_marker,
+                "sent_at_ms": 0,
+                "reply_text": None,
+                "reply_at_ms": None,
+            }
+            self.verification_send_status_vars[channel].set(f"监听中 ({display_name})")
+            self.append_log(f">>> 已初始化 {display_name} 验证通道: target={target}, marker={session_marker}")
 
     def _verification_session_marker(self, channel: str, target: str) -> str:
         if channel == self.qq_channel and ":" in target:
@@ -2360,7 +2318,7 @@ class FirstBootApp:
             return candidates[-1]
         return paragraphs[-1] if paragraphs else raw_text.strip()
 
-    def _find_latest_verification_reply(self, session_marker: str, sent_at_ms: int) -> tuple[str, int] | None:
+    def _find_latest_bot_reply(self, session_marker: str, after_ms: int) -> tuple[str, int] | None:
         session_dir = self._session_store_dir()
         if not session_dir.exists():
             return None
@@ -2382,13 +2340,13 @@ class FirstBootApp:
                 if not isinstance(event, dict) or event.get("type") != "message":
                     continue
                 message = event.get("message")
-                if not isinstance(message, dict) or message.get("role") != "user":
+                if not isinstance(message, dict) or message.get("role") != "assistant":
                     continue
                 timestamp_ms = self._session_event_timestamp_ms(event, message)
-                if timestamp_ms is None or timestamp_ms < sent_at_ms:
+                if timestamp_ms is None or timestamp_ms < after_ms:
                     continue
                 raw_text = self._extract_session_message_text(message)
-                reply_text = self._extract_user_reply_text(raw_text)
+                reply_text = raw_text.strip()
                 if not reply_text:
                     continue
                 if latest_reply is None or timestamp_ms >= latest_reply[1]:
@@ -2399,9 +2357,9 @@ class FirstBootApp:
         preview_text = reply_text if len(reply_text) <= 80 else reply_text[:77] + "..."
         try:
             stamp = dt.datetime.fromtimestamp(reply_at_ms / 1000).strftime("%H:%M:%S")
-            return f"回执：{preview_text}（{stamp}）"
+            return f"回复：{preview_text}（{stamp}）"
         except Exception:
-            return f"回执：{preview_text}"
+            return f"回复：{preview_text}"
 
     def _poll_verification_replies(self, notify_waiting: bool) -> None:
         self._cancel_verification_polling()
@@ -2410,64 +2368,44 @@ class FirstBootApp:
 
         matched_channel: str | None = None
         matched_reply: str | None = None
-        waiting_for_weixin_context = False
 
         for channel, state in self.verification_channels.items():
-            if channel == self.weixin_channel and state.get("waiting_for_context_token"):
-                waiting_for_weixin_context = True
-                target = state.get("target")
-                account_name = state.get("weixin_account_name")
-                if (
-                    isinstance(target, str)
-                    and target.strip()
-                    and self._weixin_context_token_ready(
-                        target,
-                        account_name if isinstance(account_name, str) else None,
-                    )
-                ):
-                    self.append_log(">>> 已检测到微信会话上下文 token，自动补发验证消息")
-                    self.verification_status.set("已检测到微信会话上下文，正在自动补发验证消息…")
-                    if self._send_verification_message_to_target(channel, target):
-                        waiting_for_weixin_context = False
-                    else:
-                        self.verification_status.set("微信自动补发验证消息失败，请点击“重新发送验证消息”重试。")
-                continue
             if state.get("reply_text"):
                 matched_channel = channel
                 matched_reply = str(state.get("reply_text") or "")
                 break
-            session_marker = state.get("session_marker")
-            sent_at_ms = state.get("sent_at_ms")
-            if not isinstance(session_marker, str) or not isinstance(sent_at_ms, int):
-                continue
-            latest_reply = self._find_latest_verification_reply(session_marker, sent_at_ms)
+            session_marker = state.get("session_marker") or ""
+            last_reply_ms = state.get("reply_at_ms")
+            after_ms = int(last_reply_ms) if isinstance(last_reply_ms, (int, float)) and last_reply_ms else 0
+            latest_reply = self._find_latest_bot_reply(session_marker, after_ms)
             if latest_reply is None:
                 continue
             reply_text, reply_at_ms = latest_reply
             state["reply_text"] = reply_text
             state["reply_at_ms"] = reply_at_ms
+            self.verification_send_status_vars[channel].set("已收到用户消息")
             self.verification_reply_status_vars[channel].set(
                 self._format_verification_reply(reply_text, reply_at_ms)
             )
-            self.append_log(f">>> 已收到{self._channel_display_name(channel)}回执: {reply_text}")
+            self.append_log(f">>> 已收到{self._channel_display_name(channel)}的回复: {reply_text}")
             matched_channel = channel
             matched_reply = reply_text
             break
 
         self.verification_reply_confirmed = matched_channel is not None
         if matched_channel and matched_reply is not None:
-            self.verification_status.set(
-                f"已收到{self._channel_display_name(matched_channel)}回执，请点击右下角“完成”结束初始化。"
+            success_msg = (
+                "我已收到消息和回复。如果一切Ok，您现在就可以关闭本窗口。\n\n"
+                "接下来你可以通过微信/QQ 来引导我，也可以直接在浏览器窗口进行深入定制。"
             )
+            self.verification_status.set(success_msg)
             self._refresh_next_button_state()
             return
 
-        if waiting_for_weixin_context:
-            self.verification_status.set(
-                "微信还没有建立可主动发送的会话上下文。请先在微信里主动发一条消息，向导检测到后会自动补发验证消息。"
-            )
-        elif notify_waiting:
-            self.verification_status.set("验证消息已发送。请在任一已启用渠道回复任意一句话，向导会自动继续检查。")
+        if notify_waiting:
+            self.verification_status.set("正在等待，请通过微信或QQ发送任意消息...")
+        else:
+            self.verification_status.set("请通过微信或QQ发送任意消息给 OpenClaw，我将自动检测回复。")
         self._refresh_next_button_state()
         self.verification_poll_after_id = self.root.after(2000, self._poll_verification_replies, notify_waiting)
 
