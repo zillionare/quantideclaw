@@ -2229,7 +2229,14 @@ class FirstBootApp:
         return target
 
     def _session_store_dir(self) -> Path:
-        return self.config_path.parent / "agents" / "main" / "sessions"
+        candidates = [
+            self.config_path.parent / ".openclaw" / "agents" / "main" / "sessions",
+            self.config_path.parent / "agents" / "main" / "sessions",
+        ]
+        for candidate in candidates:
+            if candidate.is_dir() and any(candidate.glob("*.jsonl")):
+                return candidate
+        return candidates[0]
 
     def _coerce_timestamp_ms(self, value: object) -> int | None:
         numeric = parse_number(value)
