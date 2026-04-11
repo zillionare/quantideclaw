@@ -2205,7 +2205,9 @@ class FirstBootApp:
 
 
     def _init_verification_channels_for_polling(self) -> None:
-        for channel, display_name in self._selected_verification_channels():
+        channels = list(self._selected_verification_channels())
+        self.append_log(f"DEBUG: _init_verification_channels_for_polling, 选中 {len(channels)} 个通道: {channels}")
+        for channel, display_name in channels:
             target = self._resolve_welcome_target(channel)
             if not target:
                 self.append_log(f"WARN: 无法确定 {channel} ({display_name}) 的目标用户")
@@ -2321,18 +2323,27 @@ class FirstBootApp:
     def _find_latest_bot_reply(self, session_marker: str, after_ms: int) -> tuple[str, int] | None:
         session_dir = self._session_store_dir()
         if not session_dir.exists():
+            self.append_log(f"DEBUG: session目录不存在: {session_dir}")
+            return None
+
+        all_files = list(session_dir.glob("*.jsonl"))
+        self.append_log(f"DEBUG: session目录 {session_dir}, 找到 {len(all_files)} 个jsonl文件")
+        if not all_files:
             return None
 
         latest_reply: tuple[str, int] | None = None
-        for path in session_dir.glob("*.jsonl"):
+        for path in all_files:
             try:
                 payload = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            if session_marker not in payload:
+
+            if session_marker and session_marker not in payload:
                 continue
 
+            line_count = 0
             for raw_line in payload.splitlines():
+                line_count += 1
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
@@ -2351,6 +2362,12 @@ class FirstBootApp:
                     continue
                 if latest_reply is None or timestamp_ms >= latest_reply[1]:
                     latest_reply = (reply_text, timestamp_ms)
+                    self.append_log(f"DEBUG: 发现候选回复 [{path.name}:{line_count}] ts={timestamp_ms} text={reply_text[:60]}")
+
+        if latest_reply:
+            self.append_log(f"DEBUG: _find_latest_bot_reply 返回结果: {latest_reply[0][:60]}")
+        else:
+            self.append_log(f"DEBUG: _find_latest_bot_reply 未找到匹配的assistant消息 (marker={session_marker[:20] if session_marker else 'EMPTY'}, after_ms={after_ms})")
         return latest_reply
 
     def _format_verification_reply(self, reply_text: str, reply_at_ms: int) -> str:
@@ -2369,6 +2386,7 @@ class FirstBootApp:
         matched_channel: str | None = None
         matched_reply: str | None = None
 
+        self.append_log(f"DEBUG: _poll_verification_replies 触发, channels={list(self.verification_channels.keys())}")
         for channel, state in self.verification_channels.items():
             if state.get("reply_text"):
                 matched_channel = channel
