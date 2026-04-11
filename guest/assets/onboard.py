@@ -322,6 +322,7 @@ class FirstBootApp:
         self.verification_started_signature: str | None = None
         self.verification_poll_after_id: str | None = None
         self.verification_channels: dict[str, dict[str, object]] = {}
+        self.verification_page_entered_at_ms: int = 0
         self.verification_send_status_vars = {
             self.weixin_channel: tk.StringVar(value="等待用户发送消息"),
             self.qq_channel: tk.StringVar(value="等待用户发送消息"),
@@ -473,6 +474,9 @@ class FirstBootApp:
         self.main_canvas.yview_moveto(0)
 
         self.current_step = step_idx
+        # 记录进入验证页的时间，用于过滤历史消息
+        if step_idx == self.verification_step_index:
+            self.verification_page_entered_at_ms = int(time.time() * 1000)
         self._update_sidebar()
 
         # Build current step content
@@ -2411,7 +2415,10 @@ class FirstBootApp:
                 break
             session_marker = state.get("session_marker") or ""
             last_reply_ms = state.get("reply_at_ms")
-            after_ms = int(last_reply_ms) if isinstance(last_reply_ms, (int, float)) and last_reply_ms else 0
+            # 使用验证页进入时间作为起点，避免检测历史消息
+            page_entered_ms = getattr(self, 'verification_page_entered_at_ms', 0)
+            after_ms = int(last_reply_ms) if isinstance(last_reply_ms, (int, float)) and last_reply_ms else page_entered_ms
+            self.append_log(f"DEBUG: 查找回复 for {channel}, after_ms={after_ms}, page_entered={page_entered_ms}")
             latest_reply = self._find_latest_bot_reply(session_marker, after_ms)
             if latest_reply is None:
                 continue
