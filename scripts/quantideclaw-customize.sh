@@ -19,6 +19,9 @@ MARKER_DIR="/var/lib/quantideclaw-onboard"
 STATUS_DIR="/var/lib/quantideclaw-build"
 STATUS_FILE="${STATUS_DIR}/browser-status.txt"
 OPENCLAW_WRAPPER="/usr/local/bin/quantideclaw-openclaw"
+RUNTIME_OPENCLAW_HOME="/home/${BUILD_USER}/.openclaw"
+RUNTIME_OPENCLAW_CONFIG_PATH="${RUNTIME_OPENCLAW_HOME}/openclaw.json"
+RUNTIME_OPENCLAW_WORKSPACE="${RUNTIME_OPENCLAW_HOME}/workspace"
 
 log_info() {
     echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $*"
@@ -356,7 +359,7 @@ validate_openclaw_runtime() {
 install_weixin_plugin_for_user() {
     if ! runuser -u "${BUILD_USER}" -- /bin/bash -c '
         set -euo pipefail
-        plugin_root="/opt/quantideclaw-onboard/.openclaw"
+        plugin_root="/home/'"${BUILD_USER}"'/.openclaw"
         plugin_package="${WEIXIN_PLUGIN_PACKAGE:-@tencent-weixin/openclaw-weixin}"
         install_log="$(mktemp)"
         mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
@@ -380,7 +383,7 @@ install_weixin_plugin_for_user() {
         if [[ -n "$local_package" ]]; then
             echo "[INFO] Installing weixin plugin from local package: $local_package" >&2
             rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
-            if OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1; then
+            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1; then
                 cat "$install_log"
                 rm -f "$install_log"
                 exit 0
@@ -391,7 +394,7 @@ install_weixin_plugin_for_user() {
 
         for attempt in 1 2 3 4 5; do
             rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
-            if OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$plugin_package" >"$install_log" 2>&1; then
+            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$plugin_package" >"$install_log" 2>&1; then
                 cat "$install_log"
                 rm -f "$install_log"
                 exit 0
@@ -417,13 +420,13 @@ install_weixin_plugin_for_user() {
 install_qqbot_plugin_for_user() {
     if ! runuser -u "${BUILD_USER}" -- /bin/bash -c '
         set -euo pipefail
-        plugin_root="/opt/quantideclaw-onboard/.openclaw"
+        plugin_root="/home/'"${BUILD_USER}"'/.openclaw"
         plugin_package="${QQBOT_PLUGIN_PACKAGE:-@tencent-connect/openclaw-qqbot@latest}"
         install_log="$(mktemp)"
         mkdir -p "$plugin_root/extensions" "$plugin_root/hook-packs"
 
         if [[ -d "$plugin_root/extensions/openclaw-qqbot" ]]; then
-            OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot >/dev/null 2>&1 || true
+            OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot >/dev/null 2>&1 || true
             echo "[INFO] QQBot plugin already present at $plugin_root/extensions/openclaw-qqbot, skipping reinstall." >&2
             rm -f "$install_log"
             exit 0
@@ -442,9 +445,9 @@ install_qqbot_plugin_for_user() {
         if [[ -n "$local_package" ]]; then
             echo "[INFO] Installing qqbot plugin from local package: $local_package" >&2
             rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
-            if OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1; then
+            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1; then
                 cat "$install_log"
-                OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
+                OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
                 rm -f "$install_log"
                 exit 0
             fi
@@ -454,9 +457,9 @@ install_qqbot_plugin_for_user() {
 
         for attempt in 1 2 3 4 5; do
             rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
-            if OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$plugin_package" >"$install_log" 2>&1; then
+            if OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$plugin_package" >"$install_log" 2>&1; then
                 cat "$install_log"
-                OPENCLAW_HOME="/opt/quantideclaw-onboard" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
+                OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
                 rm -f "$install_log"
                 exit 0
             fi
@@ -481,7 +484,12 @@ install_qqbot_plugin_for_user() {
 install_openclaw() {
     log_info "Installing OpenClaw..."
 
-    install -d -m 0755 "${ONBOARD_HOME}" "${ONBOARD_ASSET_DIR}" "${STATUS_DIR}"
+    install -d -m 0755 \
+        "${ONBOARD_HOME}" \
+        "${ONBOARD_ASSET_DIR}" \
+        "${STATUS_DIR}" \
+        "${RUNTIME_OPENCLAW_HOME}" \
+        "${RUNTIME_OPENCLAW_WORKSPACE}"
 
     # Fix permissions for local plugin packages so BUILD_USER can read them
     if [[ -d /root/assets ]]; then
@@ -490,10 +498,10 @@ install_openclaw() {
     fi
 
     cat >"${INSTALLER_ENV}" <<EOF
-OPENCLAW_HOME=${ONBOARD_HOME}
+OPENCLAW_HOME=${RUNTIME_OPENCLAW_HOME}
 OPENCLAW_ASSETS_DIR=${ONBOARD_ASSET_DIR}
-OPENCLAW_CONFIG_PATH=${ONBOARD_HOME}/.openclaw/openclaw.json
-OPENCLAW_WORKSPACE=/home/${BUILD_USER}/.openclaw/workspace
+OPENCLAW_CONFIG_PATH=${RUNTIME_OPENCLAW_CONFIG_PATH}
+OPENCLAW_WORKSPACE=${RUNTIME_OPENCLAW_WORKSPACE}
 WEIXIN_PLUGIN_PACKAGE=@tencent-weixin/openclaw-weixin
 WEIXIN_CHANNEL=openclaw-weixin
 QQBOT_PLUGIN_PACKAGE=@tencent-connect/openclaw-qqbot@latest
@@ -510,7 +518,7 @@ EOF
     npm install -g openclaw
     repair_openclaw_runtime_deps
     install_openclaw_wrapper
-    chown -R "${BUILD_USER}:${BUILD_USER}" "${ONBOARD_HOME}"
+    chown -R "${BUILD_USER}:${BUILD_USER}" "${ONBOARD_HOME}" "${RUNTIME_OPENCLAW_HOME}"
     # Fix permissions for local plugin packages so BUILD_USER can read them
     if [[ -d /root/assets ]]; then
         chmod 755 /root/assets

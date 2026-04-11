@@ -21,7 +21,10 @@
             "matchCommandLine": true
         },
         "sshpass": true,
-        "tar": true
+        "tar": true,
+        "set": true,
+        "command": true,
+        "exit": true
     },
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda"

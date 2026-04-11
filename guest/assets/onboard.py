@@ -54,8 +54,11 @@ REQUEST_ID_RE = re.compile(
     re.IGNORECASE,
 )
 GATEWAY_HEALTH_NOISE_PATTERNS = (
+    re.compile(r"^\[qqbot-[^\]]+\]\s+registered\b.*\btool\b", re.IGNORECASE),
     re.compile(r"qqbot-remind", re.IGNORECASE),
+    re.compile(r"qqbot-channel-api", re.IGNORECASE),
     re.compile(r"registered\s+qqbot\s+remind\s+tool", re.IGNORECASE),
+    re.compile(r"registered\s+qq\s+channel\s+api\s+proxy\s+tool", re.IGNORECASE),
 )
 
 
@@ -251,6 +254,7 @@ class FirstBootApp:
         self.openclaw_home = expand_path(
             self.env.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))
         )
+        self.runtime_openclaw_home = Path.home() / ".openclaw"
         self.workspace_dir = expand_path(
             self.env.get("OPENCLAW_WORKSPACE", str(self.openclaw_home / "workspace"))
         )
@@ -312,7 +316,22 @@ class FirstBootApp:
         self.pairing_status = tk.StringVar(value="请点击下方按钮刷新配对状态。")
         self.pairing_runtime_signature: str | None = None
         self.setup_completed_signature: str | None = None
+        self.verification_status = tk.StringVar(value="下一步将发送验证消息，并等待你的回执。")
+        self.verification_reply_confirmed = False
+        self.verification_in_progress = False
+        self.verification_started_signature: str | None = None
+        self.verification_poll_after_id: str | None = None
+        self.verification_channels: dict[str, dict[str, object]] = {}
+        self.verification_send_status_vars = {
+            self.weixin_channel: tk.StringVar(value="验证消息：待发送"),
+            self.qq_channel: tk.StringVar(value="验证消息：待发送"),
+        }
+        self.verification_reply_status_vars = {
+            self.weixin_channel: tk.StringVar(value="回执：尚未收到"),
+            self.qq_channel: tk.StringVar(value="回执：尚未收到"),
+        }
         self.images: dict[str, object] = {}
+        self.log = None
         self.openrouter_step_index = 2
         self.channel_step_index = 3
         self.verification_step_index = 4
@@ -445,6 +464,9 @@ class FirstBootApp:
     def _show_step(self, step_idx):
         if self.current_step == self.openrouter_step_index and step_idx != self.openrouter_step_index:
             self._cancel_model_query("已离开 OpenRouter 页面，停止当前模型验证。")
+        if self.current_step == self.verification_step_index and step_idx != self.verification_step_index:
+            self._cancel_verification_polling()
+            self.log = None
         # Clear main area and reset scroll
         for widget in self.main_area.winfo_children():
             widget.destroy()
@@ -498,6 +520,12 @@ class FirstBootApp:
 
     def _refresh_next_button_state(self) -> None:
         if not hasattr(self, "next_btn"):
+            return
+        if self.current_step == self.verification_step_index:
+            if self.verification_reply_confirmed:
+                self.next_btn.state(["!disabled"])
+            else:
+                self.next_btn.state(["disabled"])
             return
         if self.current_step != self.openrouter_step_index:
             self.next_btn.state(["!disabled"])
@@ -1294,6 +1322,9 @@ class FirstBootApp:
             print(f"[LOG] 无法自动打开控制台，请手动访问: {url}")
 
     def complete_setup(self) -> None:
+        if self.current_step == self.verification_step_index and not self.verification_reply_confirmed:
+            messagebox.showerror("请先完成双向验证", "请先在任一已启用渠道回复任意一句话，并等待向导显示回执。")
+            return
         self._write_completion_marker()
         self._close_app()
         if not self.preview:
@@ -1987,7 +2018,7 @@ class FirstBootApp:
 
         tk.Label(
             card,
-            text="这一屏都是提示信息。",
+            text="双向验证",
             font=("Noto Sans CJK SC", 13, "bold"),
             bg="#f8f9fa",
             fg="#1f1f1f",
@@ -1996,12 +2027,7 @@ class FirstBootApp:
 
         tk.Label(
             card,
-            text=(
-                "我刚刚往你配置的渠道发送了一条『你好， Quantide Claw 欢迎你！』的消息，"
-                "请在微信或 QQ 上面接收。\n\n"
-                "如果收到，说明配置全部成功完成，你可以正常使用啦！\n\n"
-                "如果没有收到，请重试。"
-            ),
+            textvariable=self.verification_status,
             wraplength=760,
             justify=tk.LEFT,
             font=("Noto Sans CJK SC", 12),
@@ -2009,14 +2035,441 @@ class FirstBootApp:
             fg="#333333",
         ).pack(anchor=tk.W, pady=(16, 0))
 
+        channels_card = tk.Frame(frame, bg="#ffffff")
+        channels_card.pack(fill=tk.X, pady=(18, 0))
+
+        selected_channels = self._selected_verification_channels()
+        if selected_channels:
+            for channel, display_name in selected_channels:
+                item = tk.Frame(channels_card, bg="#ffffff", highlightbackground="#e5e7eb", highlightthickness=1)
+                item.pack(fill=tk.X, pady=(0, 12))
+
+                tk.Label(
+                    item,
+                    text=display_name,
+                    font=("Noto Sans CJK SC", 12, "bold"),
+                    bg="#ffffff",
+                    fg="#1f1f1f",
+                    padx=16,
+                    pady=10,
+                ).pack(anchor=tk.W)
+
+                tk.Label(
+                    item,
+                    textvariable=self.verification_send_status_vars[channel],
+                    wraplength=720,
+                    justify=tk.LEFT,
+                    font=("Noto Sans CJK SC", 11),
+                    bg="#ffffff",
+                    fg="#374151",
+                    padx=16,
+                ).pack(anchor=tk.W, pady=(0, 8))
+
+                tk.Label(
+                    item,
+                    textvariable=self.verification_reply_status_vars[channel],
+                    wraplength=720,
+                    justify=tk.LEFT,
+                    font=("Noto Sans CJK SC", 11),
+                    bg="#ffffff",
+                    fg="#0f766e",
+                    padx=16,
+                ).pack(anchor=tk.W, pady=(0, 12))
+        else:
+            tk.Label(
+                channels_card,
+                text="当前没有启用任何渠道，无法执行双向验证。",
+                font=("Noto Sans CJK SC", 11),
+                bg="#ffffff",
+                fg="#b91c1c",
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W)
+
+        action_row = tk.Frame(frame, bg="#ffffff")
+        action_row.pack(fill=tk.X, pady=(6, 12))
+
+        self.verification_resend_button = tk.Button(
+            action_row,
+            text="重新发送验证消息",
+            command=self.retry_verification,
+            bg="#ffffff",
+            fg="#1f2937",
+            font=("Noto Sans CJK SC", 11, "bold"),
+            relief=tk.SOLID,
+            bd=1,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        )
+        self.verification_resend_button.pack(side=tk.LEFT)
+
+        self.verification_refresh_button = tk.Button(
+            action_row,
+            text="立即检查回执",
+            command=self.check_verification_replies_now,
+            bg="#ffffff",
+            fg="#1f2937",
+            font=("Noto Sans CJK SC", 11),
+            relief=tk.SOLID,
+            bd=1,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        )
+        self.verification_refresh_button.pack(side=tk.LEFT, padx=(10, 0))
+
+        log_card = tk.Frame(frame, bg="#f8f9fa", padx=16, pady=16)
+        log_card.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            log_card,
+            text="验证日志",
+            font=("Noto Sans CJK SC", 11, "bold"),
+            bg="#f8f9fa",
+            fg="#1f1f1f",
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        self.log = scrolledtext.ScrolledText(log_card, height=10, font=("Monospace", 10))
+        self.log.pack(fill=tk.BOTH, expand=True)
+        self.log.configure(state=tk.DISABLED)
+
         tk.Label(
             frame,
-            text="点击右下角“完成”后，将关闭当前对话框并打开 OpenClaw 控制台。",
+            text=(
+                "进入本页后会自动发送验证消息。请在任一已启用渠道回复任意一句话，"
+                "向导检测到回执后才会放开右下角“完成”按钮。"
+            ),
             font=("Noto Sans CJK SC", 10),
             bg="#ffffff",
             fg="#666666",
             justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(18, 0))
+        ).pack(anchor=tk.W, pady=(16, 0))
+
+        self._set_verification_busy(self.verification_in_progress)
+        self._refresh_next_button_state()
+        self.root.after(80, self._maybe_start_verification_after_step_render)
+
+    def _selected_verification_channels(self) -> list[tuple[str, str]]:
+        channels: list[tuple[str, str]] = []
+        if self.install_weixin.get():
+            channels.append((self.weixin_channel, "微信"))
+        if self.install_qqbot.get():
+            channels.append((self.qq_channel, "QQ"))
+        return channels
+
+    def _channel_display_name(self, channel: str) -> str:
+        if channel == self.weixin_channel:
+            return "微信"
+        if channel == self.qq_channel:
+            return "QQ"
+        return channel
+
+    def _reset_verification_state(self, status_text: str) -> None:
+        self._cancel_verification_polling()
+        self.verification_status.set(status_text)
+        self.verification_reply_confirmed = False
+        self.verification_channels = {}
+        selected = {channel for channel, _ in self._selected_verification_channels()}
+        for channel in (self.weixin_channel, self.qq_channel):
+            if channel in selected:
+                self.verification_send_status_vars[channel].set("验证消息：待发送")
+                self.verification_reply_status_vars[channel].set("回执：尚未收到")
+            else:
+                self.verification_send_status_vars[channel].set("验证消息：未启用")
+                self.verification_reply_status_vars[channel].set("回执：未启用")
+        self._refresh_next_button_state()
+
+    def _cancel_verification_polling(self) -> None:
+        after_id = self.verification_poll_after_id
+        self.verification_poll_after_id = None
+        if not after_id:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except tk.TclError:
+            pass
+
+    def _set_verification_busy(self, busy: bool) -> None:
+        self.verification_in_progress = busy
+        if self._widget_exists(getattr(self, "verification_resend_button", None)):
+            self.verification_resend_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        if self._widget_exists(getattr(self, "verification_refresh_button", None)):
+            self.verification_refresh_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
+
+    def _maybe_start_verification_after_step_render(self) -> None:
+        if self.current_step != self.verification_step_index:
+            return
+        if self.verification_in_progress:
+            return
+        signature = self._pairing_runtime_state_signature()
+        if self.verification_started_signature == signature and self.verification_channels:
+            self._poll_verification_replies(notify_waiting=False)
+            return
+        self._start_verification_flow(force_resend=False)
+
+    def retry_verification(self) -> None:
+        if self.verification_in_progress:
+            return
+        self.verification_started_signature = None
+        self._reset_verification_state("正在重新发送验证消息…")
+        self._start_verification_flow(force_resend=True)
+
+    def check_verification_replies_now(self) -> None:
+        if self.current_step != self.verification_step_index:
+            return
+        self.verification_status.set("正在检查最新回执…")
+        self._poll_verification_replies(notify_waiting=True)
+
+    def _start_verification_flow(self, *, force_resend: bool) -> None:
+        if self.current_step != self.verification_step_index:
+            return
+        signature = self._pairing_runtime_state_signature()
+        if not force_resend and self.verification_started_signature == signature and self.verification_channels:
+            self._poll_verification_replies(notify_waiting=False)
+            return
+        self.verification_started_signature = signature
+        self._set_verification_busy(True)
+        self.verification_status.set("正在准备发送验证消息…")
+        self.root.after(50, self._execute_verification_flow)
+
+    def _execute_verification_flow(self) -> None:
+        delivered = False
+        try:
+            delivered = self.execute_setup()
+        except Exception as exc:
+            self.setup_completed_signature = None
+            self.verification_status.set(f"初始化失败: {exc}")
+            self.append_log(f"ERROR: {exc}")
+            messagebox.showerror("初始化失败", str(exc))
+        else:
+            signature = self._pairing_runtime_state_signature()
+            self.setup_completed_signature = signature if delivered else None
+            if delivered and self._has_pending_weixin_context():
+                self.verification_status.set(
+                    "QQ 验证消息已发送；微信还需要你先主动发一条消息完成会话预热，向导检测到后会自动补发。"
+                )
+                self._poll_verification_replies(notify_waiting=False)
+            elif delivered:
+                self.verification_status.set("验证消息已发送。请在任一已启用渠道回复任意一句话，向导会自动检查回执。")
+                self._poll_verification_replies(notify_waiting=False)
+            elif self._has_pending_weixin_context():
+                self.verification_status.set(
+                    "微信还没有建立会话上下文。请先在微信里主动发一条消息，向导检测到后会自动补发验证消息。"
+                )
+                self._poll_verification_replies(notify_waiting=False)
+            else:
+                self.verification_status.set("验证消息还没有发出去，请检查上面的状态，修正后再重试。")
+        finally:
+            self._set_verification_busy(False)
+            self._refresh_next_button_state()
+
+    def _verification_session_marker(self, channel: str, target: str) -> str:
+        if channel == self.qq_channel and ":" in target:
+            return target.rsplit(":", 1)[-1]
+        return target
+
+    def _session_store_dir(self) -> Path:
+        return self.config_path.parent / "agents" / "main" / "sessions"
+
+    def _coerce_timestamp_ms(self, value: object) -> int | None:
+        numeric = parse_number(value)
+        if numeric is not None:
+            if numeric < 10_000_000_000:
+                numeric *= 1000
+            return int(numeric)
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            try:
+                parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return int(parsed.timestamp() * 1000)
+        return None
+
+    def _session_event_timestamp_ms(self, event: dict[str, object], message: dict[str, object]) -> int | None:
+        for payload in (
+            event.get("timestamp"),
+            event.get("createdAt"),
+            message.get("timestamp"),
+            message.get("createdAt"),
+        ):
+            coerced = self._coerce_timestamp_ms(payload)
+            if coerced is not None:
+                return coerced
+        return None
+
+    def _extract_session_message_text(self, message: dict[str, object]) -> str:
+        pieces: list[str] = []
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        pieces.append(text.strip())
+                elif isinstance(item, str) and item.strip():
+                    pieces.append(item.strip())
+        elif isinstance(content, str) and content.strip():
+            pieces.append(content.strip())
+
+        raw_text = "\n\n".join(pieces).strip()
+        if raw_text:
+            return raw_text
+
+        fallback_text = message.get("text")
+        if isinstance(fallback_text, str):
+            return fallback_text.strip()
+        return ""
+
+    def _extract_user_reply_text(self, raw_text: str) -> str:
+        if not raw_text.strip():
+            return ""
+
+        paragraphs = [segment.strip() for segment in re.split(r"\n\s*\n", raw_text) if segment.strip()]
+        candidates: list[str] = []
+        ignored_prefixes = (
+            "conversation info",
+            "message id",
+            "sender",
+            "source",
+            "channel",
+            "timestamp",
+            "time",
+            "peer",
+            "user id",
+            "openid",
+            "appid",
+        )
+
+        for paragraph in paragraphs:
+            lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+            filtered: list[str] = []
+            for line in lines:
+                lowered = line.lower()
+                if lowered.startswith(ignored_prefixes):
+                    continue
+                if line.startswith("```") or line.startswith("{") or line.startswith("["):
+                    continue
+                filtered.append(line)
+            if filtered:
+                candidates.append("\n".join(filtered))
+
+        if candidates:
+            return candidates[-1]
+        return paragraphs[-1] if paragraphs else raw_text.strip()
+
+    def _find_latest_verification_reply(self, session_marker: str, sent_at_ms: int) -> tuple[str, int] | None:
+        session_dir = self._session_store_dir()
+        if not session_dir.exists():
+            return None
+
+        latest_reply: tuple[str, int] | None = None
+        for path in session_dir.glob("*.jsonl"):
+            try:
+                payload = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if session_marker not in payload:
+                continue
+
+            for raw_line in payload.splitlines():
+                try:
+                    event = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or event.get("type") != "message":
+                    continue
+                message = event.get("message")
+                if not isinstance(message, dict) or message.get("role") != "user":
+                    continue
+                timestamp_ms = self._session_event_timestamp_ms(event, message)
+                if timestamp_ms is None or timestamp_ms < sent_at_ms:
+                    continue
+                raw_text = self._extract_session_message_text(message)
+                reply_text = self._extract_user_reply_text(raw_text)
+                if not reply_text:
+                    continue
+                if latest_reply is None or timestamp_ms >= latest_reply[1]:
+                    latest_reply = (reply_text, timestamp_ms)
+        return latest_reply
+
+    def _format_verification_reply(self, reply_text: str, reply_at_ms: int) -> str:
+        preview_text = reply_text if len(reply_text) <= 80 else reply_text[:77] + "..."
+        try:
+            stamp = dt.datetime.fromtimestamp(reply_at_ms / 1000).strftime("%H:%M:%S")
+            return f"回执：{preview_text}（{stamp}）"
+        except Exception:
+            return f"回执：{preview_text}"
+
+    def _poll_verification_replies(self, notify_waiting: bool) -> None:
+        self._cancel_verification_polling()
+        if self.current_step != self.verification_step_index:
+            return
+
+        matched_channel: str | None = None
+        matched_reply: str | None = None
+        waiting_for_weixin_context = False
+
+        for channel, state in self.verification_channels.items():
+            if channel == self.weixin_channel and state.get("waiting_for_context_token"):
+                waiting_for_weixin_context = True
+                target = state.get("target")
+                account_name = state.get("weixin_account_name")
+                if (
+                    isinstance(target, str)
+                    and target.strip()
+                    and self._weixin_context_token_ready(
+                        target,
+                        account_name if isinstance(account_name, str) else None,
+                    )
+                ):
+                    self.append_log(">>> 已检测到微信会话上下文 token，自动补发验证消息")
+                    self.verification_status.set("已检测到微信会话上下文，正在自动补发验证消息…")
+                    if self._send_verification_message_to_target(channel, target):
+                        waiting_for_weixin_context = False
+                    else:
+                        self.verification_status.set("微信自动补发验证消息失败，请点击“重新发送验证消息”重试。")
+                continue
+            if state.get("reply_text"):
+                matched_channel = channel
+                matched_reply = str(state.get("reply_text") or "")
+                break
+            session_marker = state.get("session_marker")
+            sent_at_ms = state.get("sent_at_ms")
+            if not isinstance(session_marker, str) or not isinstance(sent_at_ms, int):
+                continue
+            latest_reply = self._find_latest_verification_reply(session_marker, sent_at_ms)
+            if latest_reply is None:
+                continue
+            reply_text, reply_at_ms = latest_reply
+            state["reply_text"] = reply_text
+            state["reply_at_ms"] = reply_at_ms
+            self.verification_reply_status_vars[channel].set(
+                self._format_verification_reply(reply_text, reply_at_ms)
+            )
+            self.append_log(f">>> 已收到{self._channel_display_name(channel)}回执: {reply_text}")
+            matched_channel = channel
+            matched_reply = reply_text
+            break
+
+        self.verification_reply_confirmed = matched_channel is not None
+        if matched_channel and matched_reply is not None:
+            self.verification_status.set(
+                f"已收到{self._channel_display_name(matched_channel)}回执，请点击右下角“完成”结束初始化。"
+            )
+            self._refresh_next_button_state()
+            return
+
+        if waiting_for_weixin_context:
+            self.verification_status.set(
+                "微信还没有建立可主动发送的会话上下文。请先在微信里主动发一条消息，向导检测到后会自动补发验证消息。"
+            )
+        elif notify_waiting:
+            self.verification_status.set("验证消息已发送。请在任一已启用渠道回复任意一句话，向导会自动继续检查。")
+        self._refresh_next_button_state()
+        self.verification_poll_after_id = self.root.after(2000, self._poll_verification_replies, notify_waiting)
 
     def _sync_scroll_region(self, _event: tk.Event[tk.Misc]) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -2329,7 +2782,8 @@ class FirstBootApp:
         return "浏览器预装状态：" + "；".join(items)
 
     def append_log(self, text: str) -> None:
-        if hasattr(self, "log"):
+        log_widget = getattr(self, "log", None)
+        if self._widget_exists(log_widget):
             self.log.configure(state=tk.NORMAL)
             self.log.insert(tk.END, text + "\n")
             self.log.see(tk.END)
@@ -2826,16 +3280,10 @@ class FirstBootApp:
             "启动本地 gateway 和 Edge-TTS 代理",
             "/usr/local/bin/quantideclaw-session-start --restart-gateway",
         )
-        self.wait_for_gateway()
 
         if self.install_weixin.get():
             self.append_log(">>> 微信扫码状态沿用渠道接入页当前结果")
 
-        self.run_command(
-            "重启 gateway 以加载最新配置",
-            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
-        )
-        self.wait_for_gateway()
         self.pairing_runtime_signature = signature
 
     def _format_pairing_time(self, value: object) -> str:
@@ -3076,39 +3524,232 @@ class FirstBootApp:
         if not self._approve_request_with_fallback(request_id):
             raise RuntimeError("审批配对请求失败，请确认 request id 是否正确。")
 
-    def send_welcome(self) -> bool:
-        """Send welcome message to connected channels.
-        
-        WeChat: After QR code login, the bot is bound to the user who scanned it (1-on-1)
-        QQ: The bot automatically becomes friends with the QQ user who applied for the AppID (1-on-1)
-        
-        Both channels don't require specifying a target - just send to the connected peer.
-        """
-        delivered = False
-        channels = []
-        
-        if self.install_weixin.get():
-            channels.append(self.weixin_channel)
-        if self.install_qqbot.get():
-            channels.append(self.qq_channel)
+    def _load_json_file(self, path: Path) -> object | None:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
-        for channel in channels:
-            # Try to send welcome message to the connected peer
-            # For WeChat/QQ with 1-on-1 binding, we don't need to specify target
+    def _channel_state_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        for root in (self.runtime_openclaw_home, self.openclaw_home):
+            expanded = expand_path(str(root))
+            if expanded not in roots:
+                roots.append(expanded)
+        return roots
+
+    def _resolve_weixin_account_info(self) -> dict[str, object] | None:
+        candidates: list[tuple[str, dict[str, object]]] = []
+        for root in self._channel_state_roots():
+            accounts_index = root / "openclaw-weixin" / "accounts.json"
+            account_ids = self._load_json_file(accounts_index)
+            if not isinstance(account_ids, list):
+                continue
+
+            for account_id in account_ids:
+                account_name = str(account_id or "").strip()
+                if not account_name:
+                    continue
+                account_path = root / "openclaw-weixin" / "accounts" / f"{account_name}.json"
+                payload = self._load_json_file(account_path)
+                if not isinstance(payload, dict):
+                    continue
+                user_id = str(payload.get("userId") or "").strip()
+                saved_at = str(payload.get("savedAt") or "")
+                if user_id:
+                    candidates.append(
+                        (
+                            saved_at,
+                            {
+                                "root": root,
+                                "account_name": account_name,
+                                "user_id": user_id,
+                                "saved_at": saved_at,
+                            },
+                        )
+                    )
+
+        if not candidates:
+            return None
+
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    def _resolve_weixin_welcome_target(self) -> str | None:
+        account_info = self._resolve_weixin_account_info()
+        if not isinstance(account_info, dict):
+            return None
+        user_id = account_info.get("user_id")
+        if isinstance(user_id, str) and user_id.strip():
+            return user_id.strip()
+        return None
+
+    def _weixin_context_token_ready(self, target: str, account_name: str | None = None) -> bool:
+        if not target.strip():
+            return False
+
+        for root in self._channel_state_roots():
+            accounts_dir = root / "openclaw-weixin" / "accounts"
+            candidate_paths: list[Path] = []
+            if account_name:
+                candidate_paths.append(accounts_dir / f"{account_name}.context-tokens.json")
+            else:
+                candidate_paths.extend(sorted(accounts_dir.glob("*.context-tokens.json")))
+
+            for path in candidate_paths:
+                payload = self._load_json_file(path)
+                if not isinstance(payload, dict):
+                    continue
+                token = payload.get(target)
+                if isinstance(token, str) and token.strip():
+                    return True
+
+        return False
+
+    def _has_pending_weixin_context(self) -> bool:
+        state = self.verification_channels.get(self.weixin_channel)
+        return isinstance(state, dict) and bool(state.get("waiting_for_context_token"))
+
+    def _resolve_qq_welcome_target(self) -> str | None:
+        candidates: list[tuple[int, str]] = []
+        for root in self._channel_state_roots():
+            known_users_path = root / "qqbot" / "data" / "known-users.json"
+            payload = self._load_json_file(known_users_path)
+            if not isinstance(payload, list):
+                continue
+
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                openid = str(entry.get("openid") or "").strip()
+                if not openid:
+                    continue
+                peer_type = str(entry.get("type") or "").strip().lower()
+                if peer_type and peer_type != "c2c":
+                    continue
+                last_seen = entry.get("lastSeenAt")
+                try:
+                    last_seen_value = int(last_seen)
+                except (TypeError, ValueError):
+                    last_seen_value = 0
+                candidates.append((last_seen_value, f"qqbot:c2c:{openid}"))
+
+        if not candidates:
+            return None
+
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    def _resolve_welcome_target(self, channel: str) -> str | None:
+        if channel == self.weixin_channel:
+            return self._resolve_weixin_welcome_target()
+        if channel == self.qq_channel:
+            return self._resolve_qq_welcome_target()
+        return None
+
+    def _send_verification_message_to_target(
+        self,
+        channel: str,
+        target: str,
+        *,
+        message_text: str = WELCOME_MESSAGE,
+        retries: int = 2,
+    ) -> bool:
+        display_name = self._channel_display_name(channel)
+        self.verification_send_status_vars[channel].set(f"验证消息：准备发往 {target}")
+        self.verification_reply_status_vars[channel].set("回执：等待对方回复")
+
+        success = False
+        for attempt in range(1, retries + 1):
             command = (
                 f"openclaw message send --channel {shell_quote(channel)} "
-                f"--message {shell_quote(WELCOME_MESSAGE)}"
+                f"--target {shell_quote(target)} "
+                f"--message {shell_quote(message_text)}"
             )
             result = self.run_command(
-                f"向 {channel} 发送欢迎消息",
+                f"向 {channel} 发送验证消息 (第 {attempt}/{retries} 次)",
                 command,
                 allow_failure=True,
+                timeout=15,
             )
             if result.returncode == 0:
+                success = True
+                break
+            self.append_log(f"WARN: 第 {attempt} 次通过 {channel} 向 {target} 发送验证消息失败")
+            if attempt < retries:
+                time.sleep(1)
+
+        if not success:
+            self.verification_send_status_vars[channel].set("验证消息：发送失败，请重试")
+            self.verification_reply_status_vars[channel].set("回执：尚未收到")
+            return False
+
+        sent_at_ms = int(time.time() * 1000)
+        state = self.verification_channels.get(channel, {})
+        if not isinstance(state, dict):
+            state = {}
+        state.update(
+            {
+                "target": target,
+                "session_marker": self._verification_session_marker(channel, target),
+                "sent_at_ms": sent_at_ms,
+                "waiting_for_context_token": False,
+            }
+        )
+        state.pop("reply_text", None)
+        state.pop("reply_at_ms", None)
+        self.verification_channels[channel] = state
+        self.verification_send_status_vars[channel].set(f"验证消息：已发送至 {target}")
+        self.verification_reply_status_vars[channel].set("回执：已发送，等待对方回复")
+        self.append_log(f">>> 验证消息已通过{display_name}发送成功，目标: {target}")
+        return True
+
+    def send_welcome(self, *, message_text: str = WELCOME_MESSAGE, retries: int = 2) -> bool:
+        delivered = False
+        channels = [channel for channel, _ in self._selected_verification_channels()]
+
+        for channel in channels:
+            account_name: str | None = None
+            target = self._resolve_welcome_target(channel)
+            if channel == self.weixin_channel:
+                account_info = self._resolve_weixin_account_info()
+                if isinstance(account_info, dict):
+                    account_name_value = account_info.get("account_name")
+                    if isinstance(account_name_value, str) and account_name_value.strip():
+                        account_name = account_name_value.strip()
+                    user_id = account_info.get("user_id")
+                    if isinstance(user_id, str) and user_id.strip():
+                        target = user_id.strip()
+
+            if not target:
+                self.verification_send_status_vars[channel].set("验证消息：未找到发送目标")
+                self.verification_reply_status_vars[channel].set("回执：请回到上一页检查绑定状态")
+                self.append_log(f"WARN: 无法确定 {channel} 的欢迎消息目标，跳过发送")
+                continue
+
+            if channel == self.weixin_channel and not self._weixin_context_token_ready(target, account_name):
+                self.verification_channels[channel] = {
+                    "target": target,
+                    "session_marker": self._verification_session_marker(channel, target),
+                    "waiting_for_context_token": True,
+                    "weixin_account_name": account_name,
+                }
+                self.verification_send_status_vars[channel].set("验证消息：等待微信会话预热")
+                self.verification_reply_status_vars[channel].set(
+                    "回执：请先在微信里主动发一条消息，向导会自动补发验证消息"
+                )
+                self.append_log(
+                    ">>> 微信当前还没有该联系人的会话上下文 token；请先在微信里主动发一条消息，向导检测到后会自动补发验证消息"
+                )
+                continue
+
+            if self._send_verification_message_to_target(
+                channel,
+                target,
+                message_text=message_text,
+                retries=retries,
+            ):
                 delivered = True
-                self.append_log(f">>> 欢迎消息已通过 {channel} 发送成功")
-            else:
-                self.append_log(f"WARN: 通过 {channel} 发送欢迎消息失败")
 
         return delivered
 
@@ -3158,14 +3799,32 @@ class FirstBootApp:
             return False
         return any(pattern.search(normalized) for pattern in GATEWAY_HEALTH_NOISE_PATTERNS)
 
-    def _probe_gateway_control_plane(self) -> bool:
+    def _command_emitted_json_payload(self, result: subprocess.CompletedProcess[str]) -> bool:
+        for payload in (result.stdout, result.stderr):
+            cleaned = self._strip_ansi(payload or "").strip()
+            if not cleaned:
+                continue
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, (dict, list)):
+                return True
+        return False
+
+    def _probe_gateway_control_plane(self, timeout: int = 10) -> bool:
         probe_commands = (
             ("复核 gateway 设备列表", "openclaw devices list --json"),
             ("复核 gateway 待审批请求", "openclaw nodes pending --json"),
         )
         for title, command in probe_commands:
-            result = self.run_command(title, command, allow_failure=True, timeout=5)
+            result = self.run_command(title, command, allow_failure=True, timeout=timeout)
             if result.returncode == 0:
+                return True
+            if self._command_emitted_json_payload(result):
+                self.append_log(
+                    f">>> {title} 已返回可用 JSON，虽然命令未及时退出，仍视为 gateway 已可用"
+                )
                 return True
         return False
 
@@ -3187,17 +3846,27 @@ class FirstBootApp:
                 return
 
             output_lines = self._extract_command_output_lines(result)
+            meaningful_lines = [
+                line for line in output_lines if not self._is_gateway_health_noise_line(line)
+            ]
+
+            should_probe_control_plane = False
             if output_lines and all(self._is_gateway_health_noise_line(line) for line in output_lines):
                 self.append_log(
                     ">>> health 输出包含已知 QQBot 噪声，改用控制面命令复核 gateway 是否已可用"
                 )
-                if self._probe_gateway_control_plane():
+                should_probe_control_plane = True
+            elif result.returncode == 124 and not meaningful_lines:
+                self.append_log(
+                    ">>> health 在超时时间内没有返回明确结果，改用控制面命令复核 gateway 是否已可用"
+                )
+                should_probe_control_plane = True
+
+            if should_probe_control_plane:
+                if self._probe_gateway_control_plane(timeout=10):
                     self.append_log(">>> gateway 控制面复核通过，继续后续初始化流程")
                     return
 
-            meaningful_lines = [
-                line for line in output_lines if not self._is_gateway_health_noise_line(line)
-            ]
             if meaningful_lines:
                 last_failure = meaningful_lines[-1]
             elif output_lines:
@@ -3208,62 +3877,43 @@ class FirstBootApp:
         raise RuntimeError("QuantideClaw gateway 未能在预期时间内启动。")
 
     def run_setup(self) -> None:
-        signature = self._pairing_runtime_state_signature()
-
-        self.prev_btn.state(["disabled"])
-        self.next_btn.state(["disabled"])
-        self.root.update_idletasks()
-
         try:
             self.validate_inputs()
-            self.execute_setup()
-        except WelcomeMessagePending as exc:
-            self.setup_completed_signature = None
-            self.append_log(f"INFO: {exc}")
-            messagebox.showwarning("欢迎消息未送达", str(exc))
         except Exception as exc:
             self.setup_completed_signature = None
             self.append_log(f"ERROR: {exc}")
             messagebox.showerror("初始化失败", str(exc))
-        else:
-            self.setup_completed_signature = signature
-            self._show_step(self.verification_step_index)
-        finally:
-            if self.current_step != self.verification_step_index:
-                if self.current_step == 0:
-                    self.prev_btn.state(["disabled"])
-                else:
-                    self.prev_btn.state(["!disabled"])
-                self._refresh_next_button_state()
+            return
 
-    def execute_setup(self) -> None:
+        self.setup_completed_signature = None
+        self.verification_started_signature = None
+        self._reset_verification_state("正在切换到双向验证页面…")
+        self._show_step(self.verification_step_index)
+
+    def execute_setup(self) -> bool:
         self.append_log("=" * 64)
         if self.preview:
-            self.append_log("开始执行 QuantideClaw 初始化流程 [预览模式]")
+            self.append_log("开始执行 QuantideClaw 双向验证流程 [预览模式]")
         else:
-            self.append_log("开始执行 QuantideClaw 初始化流程")
+            self.append_log("开始执行 QuantideClaw 双向验证流程")
         self.append_log("=" * 64)
 
         self._ensure_pairing_runtime_ready()
-        self.run_command(
-            "最终重启 gateway",
-            "/usr/local/bin/quantideclaw-session-start --restart-gateway",
-        )
-        self.wait_for_gateway()
 
         if self.preview:
-            self.append_log("[PREVIEW] 跳过欢迎消息发送检查，认为成功。")
+            self.append_log("[PREVIEW] 跳过验证消息发送检查，认为成功。")
             delivered = True
         else:
             delivered = self.send_welcome()
 
         if not delivered:
-            self.show_support_dialog()
-            raise WelcomeMessagePending("欢迎消息发送失败，请回到上一页确认渠道配置后重试。")
+            self.append_log("WARN: 验证消息发送失败，请回到上一页确认渠道配置后重试。")
+            return False
 
         self.append_log("=" * 64)
-        self.append_log("初始化流程执行完成")
+        self.append_log("双向验证消息已发送，等待用户回执")
         self.append_log("=" * 64)
+        return True
 
 
 def main() -> int:
