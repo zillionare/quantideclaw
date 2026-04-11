@@ -328,8 +328,8 @@ class FirstBootApp:
             self.qq_channel: tk.StringVar(value="等待用户发送消息"),
         }
         self.verification_reply_status_vars = {
-            self.weixin_channel: tk.StringVar(value="回复：尚未收到"),
-            self.qq_channel: tk.StringVar(value="回复：尚未收到"),
+            self.weixin_channel: tk.StringVar(value="回复：等待用户先发消息"),
+            self.qq_channel: tk.StringVar(value="回复：等待用户先发消息"),
         }
         self.images: dict[str, object] = {}
         self.log = None
@@ -2149,7 +2149,7 @@ class FirstBootApp:
         for channel in (self.weixin_channel, self.qq_channel):
             if channel in selected:
                 self.verification_send_status_vars[channel].set("等待用户发送消息")
-                self.verification_reply_status_vars[channel].set("回复：尚未收到")
+                self.verification_reply_status_vars[channel].set("回复：等待用户先发消息")
             else:
                 self.verification_send_status_vars[channel].set("未启用")
                 self.verification_reply_status_vars[channel].set("未启用")
@@ -2216,19 +2216,45 @@ class FirstBootApp:
         self.append_log(f"DEBUG: _init_verification_channels_for_polling, 选中 {len(channels)} 个通道: {channels}")
         for channel, display_name in channels:
             target = self._resolve_welcome_target(channel)
-            if not target:
-                self.append_log(f"WARN: 无法确定 {channel} ({display_name}) 的目标用户")
-                continue
-            session_marker = self._verification_session_marker(channel, target)
+            session_markers = self._verification_session_markers(channel, target)
+            session_marker = self._verification_session_marker(channel, target or "")
             self.verification_channels[channel] = {
                 "target": target,
                 "session_marker": session_marker,
+                "session_markers": session_markers,
+                "started_at_ms": self.verification_page_entered_at_ms or int(time.time() * 1000),
                 "sent_at_ms": 0,
+                "user_text": None,
+                "user_at_ms": None,
                 "reply_text": None,
                 "reply_at_ms": None,
             }
             self.verification_send_status_vars[channel].set(f"监听中 ({display_name})")
-            self.append_log(f">>> 已初始化 {display_name} 验证通道: target={target}, marker={session_marker}")
+            if target:
+                self.append_log(f">>> 已初始化 {display_name} 验证通道: target={target}, markers={session_markers}")
+            else:
+                self.append_log(f">>> 已初始化 {display_name} 验证通道: target=<等待用户首条消息>, markers={session_markers}")
+
+    def _verification_session_markers(self, channel: str, target: str | None) -> list[str]:
+        markers: list[str] = []
+
+        cleaned_target = (target or "").strip()
+        if cleaned_target:
+            markers.append(cleaned_target)
+            if channel == self.qq_channel and ":" in cleaned_target:
+                markers.append(cleaned_target.rsplit(":", 1)[-1])
+
+        if channel == self.weixin_channel:
+            markers.extend([self.weixin_channel, self.weixin_plugin_id, "weixin"])
+        elif channel == self.qq_channel:
+            markers.extend([self.qq_channel, self.qq_plugin_id, "qqbot", "c2c"])
+
+        deduped: list[str] = []
+        for marker in markers:
+            normalized = str(marker).strip()
+            if normalized and normalized not in deduped:
+                deduped.append(normalized)
+        return deduped
 
     def _verification_session_marker(self, channel: str, target: str) -> str:
         if channel == self.qq_channel and ":" in target:
@@ -2334,7 +2360,17 @@ class FirstBootApp:
             return candidates[-1]
         return paragraphs[-1] if paragraphs else raw_text.strip()
 
-    def _find_latest_bot_reply(self, session_marker: str, after_ms: int) -> tuple[str, int] | None:
+    def _session_payload_matches_markers(self, payload: str, markers: list[str]) -> bool:
+        if not markers:
+            return True
+        lowered_payload = payload.casefold()
+        return any(marker.casefold() in lowered_payload for marker in markers if marker)
+
+    def _find_latest_verification_exchange(
+        self,
+        session_markers: list[str],
+        after_ms: int,
+    ) -> dict[str, object] | None:
         session_dir = self._session_store_dir()
         if not session_dir.exists():
             self.append_log(f"DEBUG: session目录不存在: {session_dir}")
@@ -2345,29 +2381,39 @@ class FirstBootApp:
         if not all_files:
             return None
 
-        latest_reply = self._scan_session_files_for_reply(all_files, session_marker, after_ms)
-        if latest_reply is None and session_marker:
-            self.append_log(f"DEBUG: marker过滤无结果，降级为搜索所有文件...")
-            latest_reply = self._scan_session_files_for_reply(all_files, "", after_ms)
-
-        if latest_reply:
-            self.append_log(f"DEBUG: _find_latest_bot_reply 返回结果: {latest_reply[0][:60]}")
+        progress = self._scan_session_files_for_exchange(all_files, session_markers, after_ms)
+        if progress and progress.get("reply_text"):
+            reply_text = str(progress.get("reply_text") or "")
+            self.append_log(f"DEBUG: _find_latest_verification_exchange 返回回复: {reply_text[:60]}")
+        elif progress and progress.get("user_text"):
+            user_text = str(progress.get("user_text") or "")
+            self.append_log(f"DEBUG: _find_latest_verification_exchange 已捕获用户消息: {user_text[:60]}")
         else:
-            self.append_log(f"DEBUG: _find_latest_bot_reply 未找到匹配的assistant消息 (marker={session_marker[:20] if session_marker else 'EMPTY'}, after_ms={after_ms})")
-        return latest_reply
+            marker_preview = ", ".join(session_markers[:3]) if session_markers else "EMPTY"
+            self.append_log(
+                f"DEBUG: _find_latest_verification_exchange 未找到匹配消息 (markers={marker_preview}, after_ms={after_ms})"
+            )
+        return progress
 
-    def _scan_session_files_for_reply(self, files: list[Path], marker: str, after_ms: int) -> tuple[str, int] | None:
-        latest_reply: tuple[str, int] | None = None
+    def _scan_session_files_for_exchange(
+        self,
+        files: list[Path],
+        markers: list[str],
+        after_ms: int,
+    ) -> dict[str, object] | None:
+        latest_user: tuple[str, int] | None = None
+        latest_exchange: tuple[str, int, str, int] | None = None
         for path in files:
             try:
                 payload = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
 
-            if marker and marker not in payload:
+            if not self._session_payload_matches_markers(payload, markers):
                 continue
 
             line_count = 0
+            file_latest_user: tuple[str, int] | None = None
             for raw_line in payload.splitlines():
                 line_count += 1
                 try:
@@ -2377,19 +2423,52 @@ class FirstBootApp:
                 if not isinstance(event, dict) or event.get("type") != "message":
                     continue
                 message = event.get("message")
-                if not isinstance(message, dict) or message.get("role") != "assistant":
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "").strip().lower()
+                if role not in {"user", "assistant"}:
                     continue
                 timestamp_ms = self._session_event_timestamp_ms(event, message)
                 if timestamp_ms is None or timestamp_ms < after_ms:
                     continue
                 raw_text = self._extract_session_message_text(message)
-                reply_text = raw_text.strip()
-                if not reply_text:
+                message_text = self._extract_user_reply_text(raw_text)
+                if not message_text:
                     continue
-                if latest_reply is None or timestamp_ms >= latest_reply[1]:
-                    latest_reply = (reply_text, timestamp_ms)
-                    self.append_log(f"DEBUG: 发现候选回复 [{path.name}:{line_count}] ts={timestamp_ms} text={reply_text[:60]}")
-        return latest_reply
+                if role == "user":
+                    file_latest_user = (message_text, timestamp_ms)
+                    if latest_user is None or timestamp_ms >= latest_user[1]:
+                        latest_user = file_latest_user
+                    self.append_log(
+                        f"DEBUG: 发现候选用户消息 [{path.name}:{line_count}] ts={timestamp_ms} text={message_text[:60]}"
+                    )
+                    continue
+                if file_latest_user is None or timestamp_ms < file_latest_user[1]:
+                    continue
+                if latest_exchange is None or timestamp_ms >= latest_exchange[3]:
+                    latest_exchange = (file_latest_user[0], file_latest_user[1], message_text, timestamp_ms)
+                self.append_log(
+                    f"DEBUG: 发现候选回复 [{path.name}:{line_count}] ts={timestamp_ms} text={message_text[:60]}"
+                )
+
+        result: dict[str, object] = {}
+        if latest_user is not None:
+            result["user_text"] = latest_user[0]
+            result["user_at_ms"] = latest_user[1]
+        if latest_exchange is not None:
+            result["exchange_user_text"] = latest_exchange[0]
+            result["exchange_user_at_ms"] = latest_exchange[1]
+            result["reply_text"] = latest_exchange[2]
+            result["reply_at_ms"] = latest_exchange[3]
+        return result or None
+
+    def _format_verification_user_message(self, user_text: str, user_at_ms: int) -> str:
+        preview_text = user_text if len(user_text) <= 80 else user_text[:77] + "..."
+        try:
+            stamp = dt.datetime.fromtimestamp(user_at_ms / 1000).strftime("%H:%M:%S")
+            return f"用户消息：{preview_text}（{stamp}）"
+        except Exception:
+            return f"用户消息：{preview_text}"
 
     def _format_verification_reply(self, reply_text: str, reply_at_ms: int) -> str:
         preview_text = reply_text if len(reply_text) <= 80 else reply_text[:77] + "..."
@@ -2404,47 +2483,71 @@ class FirstBootApp:
         if self.current_step != self.verification_step_index:
             return
 
-        matched_channel: str | None = None
-        matched_reply: str | None = None
+        confirmed_channels: list[str] = []
+        user_seen_channels: list[str] = []
 
         self.append_log(f"DEBUG: _poll_verification_replies 触发, channels={list(self.verification_channels.keys())}")
         for channel, state in self.verification_channels.items():
-            if state.get("reply_text"):
-                matched_channel = channel
-                matched_reply = str(state.get("reply_text") or "")
-                break
-            session_marker = state.get("session_marker") or ""
-            last_reply_ms = state.get("reply_at_ms")
-            # 使用验证页进入时间作为起点，避免检测历史消息
-            page_entered_ms = getattr(self, 'verification_page_entered_at_ms', 0)
-            after_ms = int(last_reply_ms) if isinstance(last_reply_ms, (int, float)) and last_reply_ms else page_entered_ms
-            self.append_log(f"DEBUG: 查找回复 for {channel}, after_ms={after_ms}, page_entered={page_entered_ms}")
-            latest_reply = self._find_latest_bot_reply(session_marker, after_ms)
-            if latest_reply is None:
-                continue
-            reply_text, reply_at_ms = latest_reply
-            state["reply_text"] = reply_text
-            state["reply_at_ms"] = reply_at_ms
-            self.verification_send_status_vars[channel].set("已收到用户消息")
-            self.verification_reply_status_vars[channel].set(
-                self._format_verification_reply(reply_text, reply_at_ms)
-            )
-            self.append_log(f">>> 已收到{self._channel_display_name(channel)}的回复: {reply_text}")
-            matched_channel = channel
-            matched_reply = reply_text
-            break
+            session_markers = state.get("session_markers")
+            if not isinstance(session_markers, list):
+                session_markers = self._verification_session_markers(channel, str(state.get("target") or ""))
+                state["session_markers"] = session_markers
 
-        self.verification_reply_confirmed = matched_channel is not None
-        if matched_channel and matched_reply is not None:
+            started_at_ms = state.get("started_at_ms")
+            if not isinstance(started_at_ms, (int, float)) or not started_at_ms:
+                started_at_ms = getattr(self, "verification_page_entered_at_ms", 0) or int(time.time() * 1000)
+                state["started_at_ms"] = int(started_at_ms)
+
+            self.append_log(
+                f"DEBUG: 查找验证进度 for {channel}, after_ms={int(started_at_ms)}, markers={session_markers}"
+            )
+            progress = self._find_latest_verification_exchange(session_markers, int(started_at_ms))
+            if progress is None:
+                continue
+
+            user_text = progress.get("user_text")
+            user_at_ms = progress.get("user_at_ms")
+            if isinstance(user_text, str) and isinstance(user_at_ms, (int, float)):
+                previous_user_at_ms = state.get("user_at_ms")
+                state["user_text"] = user_text
+                state["user_at_ms"] = int(user_at_ms)
+                self.verification_send_status_vars[channel].set(
+                    self._format_verification_user_message(user_text, int(user_at_ms))
+                )
+                if not progress.get("reply_text"):
+                    self.verification_reply_status_vars[channel].set("回复：正在生成，请稍候...")
+                user_seen_channels.append(self._channel_display_name(channel))
+                if not isinstance(previous_user_at_ms, (int, float)) or int(user_at_ms) > int(previous_user_at_ms):
+                    self.append_log(f">>> 已收到{self._channel_display_name(channel)}的用户消息: {user_text}")
+
+            reply_text = progress.get("reply_text")
+            reply_at_ms = progress.get("reply_at_ms")
+            if isinstance(reply_text, str) and isinstance(reply_at_ms, (int, float)):
+                previous_reply_at_ms = state.get("reply_at_ms")
+                state["reply_text"] = reply_text
+                state["reply_at_ms"] = int(reply_at_ms)
+                self.verification_reply_status_vars[channel].set(
+                    self._format_verification_reply(reply_text, int(reply_at_ms))
+                )
+                confirmed_channels.append(self._channel_display_name(channel))
+                if not isinstance(previous_reply_at_ms, (int, float)) or int(reply_at_ms) > int(previous_reply_at_ms):
+                    self.append_log(f">>> 已收到{self._channel_display_name(channel)}的回复: {reply_text}")
+
+        self.verification_reply_confirmed = bool(confirmed_channels)
+        if confirmed_channels:
+            channel_text = "、".join(dict.fromkeys(confirmed_channels))
             success_msg = (
-                "我已收到消息和回复。如果一切Ok，您现在就可以关闭本窗口。\n\n"
+                f"已通过 {channel_text} 收到用户消息并确认回复。如果一切Ok，您现在就可以关闭本窗口。\n\n"
                 "接下来你可以通过微信/QQ 来引导我，也可以直接在浏览器窗口进行深入定制。"
             )
             self.verification_status.set(success_msg)
             self._refresh_next_button_state()
             return
 
-        if notify_waiting:
+        if user_seen_channels:
+            channel_text = "、".join(dict.fromkeys(user_seen_channels))
+            self.verification_status.set(f"已收到 {channel_text} 的用户消息，正在等待 OpenClaw 回复...")
+        elif notify_waiting:
             self.verification_status.set("正在等待，请通过微信或QQ发送任意消息...")
         else:
             self.verification_status.set("请通过微信或QQ发送任意消息给 OpenClaw，我将自动检测回复。")
