@@ -2611,41 +2611,14 @@ class FirstBootApp:
     def _open_models_page(self) -> None:
         self._open_url("https://openrouter.ai/models")
 
-    def _open_openrouter_keys_page(self) -> None:
-        self._open_url("https://openrouter.ai/settings/keys")
-
-    def _populate_help_dialog_image(self, parent: tk.Frame, status_var: tk.StringVar) -> None:
-        image_path = ASSET_DIR / "openrouter.jpg"
-        if not image_path.exists():
-            status_var.set("未找到参考截图，请直接点击下方按钮打开 OpenRouter API Keys 页面。")
-            return
-        if Image is None or ImageTk is None:
-            status_var.set("当前环境未安装 Pillow，无法显示截图；可直接打开 OpenRouter API Keys 页面。")
-            return
-
-        try:
-            img = Image.open(image_path)
-            target_width = 640
-            ratio = min(1.0, target_width / img.width)
-            preview = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))))
-            photo = ImageTk.PhotoImage(preview)
-            self.images[f"help_{image_path}"] = photo
-
-            image_label = tk.Label(parent, image=photo, bg="#ffffff")
-            image_label.pack(anchor=tk.W, pady=(8, 0))
-            status_var.set("下图展示了 OpenRouter 控制台中 API Keys 页面的示意。")
-        except Exception as exc:
-            status_var.set(f"参考截图加载失败: {exc}")
-
     def _show_help_dialog(self) -> None:
-        """Show help dialog with robust text fallback and optional screenshot."""
+        """Show help dialog with OpenRouter image."""
         dialog = tk.Toplevel(self.root)
         dialog.title("如何获取 OpenRouter API Key")
         dialog.geometry("700x600")
         dialog.configure(bg="#ffffff")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.minsize(640, 520)
 
         # Center the dialog
         dialog.update_idletasks()
@@ -2660,16 +2633,17 @@ class FirstBootApp:
 
         tk.Label(
             header,
-            text="获取 API Key 指南",
+            text="📖 获取 API Key 指南",
             font=("Noto Sans CJK SC", 14, "bold"),
             bg="#e41815",
             fg="#ffffff",
         ).pack(side=tk.LEFT, padx=20, pady=10)
 
-        # Content frame
+        # Content frame with scrollbar
         content_frame = tk.Frame(dialog, bg="#ffffff")
         content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
+        # Instructions
         tk.Label(
             content_frame,
             text="请按照以下步骤获取你的 OpenRouter API Key:",
@@ -2682,7 +2656,7 @@ class FirstBootApp:
 
         steps = [
             "1. 访问 openrouter.ai 并注册账号",
-            '2. 登录后打开 Settings 里的 "API Keys" 页面',
+            '2. 登录后点击左侧菜单的 "API Keys"',
             '3. 点击蓝色的 "Create" 按钮',
             "4. 复制生成的 Key 并粘贴到向导中",
         ]
@@ -2697,58 +2671,33 @@ class FirstBootApp:
                 justify=tk.LEFT,
             ).pack(anchor=tk.W, pady=(0, 8))
 
-        tk.Label(
-            content_frame,
-            text="如果你已经登录过 OpenRouter，也可以直接点击下方按钮打开 API Keys 页面。",
-            font=("Noto Sans CJK SC", 11),
-            bg="#ffffff",
-            fg="#555555",
-            wraplength=640,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(8, 14))
+        # Image
+        image_path = ASSET_DIR / "openrouter.jpg"
+        if image_path.exists() and Image is not None and ImageTk is not None:
+            try:
+                img = Image.open(image_path)
+                # Resize to fit dialog width (640px)
+                ratio = 640 / img.width
+                preview = img.resize((640, max(1, int(img.height * ratio))))
+                photo = ImageTk.PhotoImage(preview)
+                self.images[f"help_{image_path}"] = photo  # Keep reference
 
-        action_row = tk.Frame(content_frame, bg="#ffffff")
-        action_row.pack(fill=tk.X, pady=(0, 14))
-
-        tk.Button(
-            action_row,
-            text="打开 OpenRouter API Keys 页面",
-            command=self._open_openrouter_keys_page,
-            bg="#2563eb",
-            fg="#ffffff",
-            font=("Noto Sans CJK SC", 10, "bold"),
-            relief=tk.FLAT,
-            padx=16,
-            pady=6,
-            cursor="hand2",
-        ).pack(side=tk.LEFT)
-
-        screenshot_card = tk.Frame(content_frame, bg="#f8f9fa", padx=12, pady=12)
-        screenshot_card.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(
-            screenshot_card,
-            text="参考截图",
-            font=("Noto Sans CJK SC", 11, "bold"),
-            bg="#f8f9fa",
-            fg="#1f1f1f",
-        ).pack(anchor=tk.W)
-
-        help_image_status = tk.StringVar(value="正在加载参考截图...")
-        tk.Label(
-            screenshot_card,
-            textvariable=help_image_status,
-            font=("Noto Sans CJK SC", 10),
-            bg="#f8f9fa",
-            fg="#666666",
-            wraplength=620,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(8, 0))
-
-        screenshot_body = tk.Frame(screenshot_card, bg="#ffffff")
-        screenshot_body.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
-
-        dialog.after(10, lambda: self._populate_help_dialog_image(screenshot_body, help_image_status))
+                img_label = tk.Label(content_frame, image=photo, bg="#ffffff")
+                img_label.pack(pady=(20, 0))
+            except Exception as e:
+                tk.Label(
+                    content_frame,
+                    text=f"图片加载失败: {e}",
+                    fg="red",
+                    bg="#ffffff",
+                ).pack(pady=(20, 0))
+        else:
+            tk.Label(
+                content_frame,
+                text="（参考图片未找到）",
+                fg="#888888",
+                bg="#ffffff",
+            ).pack(pady=(20, 0))
 
         # Close button
         btn_frame = tk.Frame(dialog, bg="#f8f9fa", height=60)
