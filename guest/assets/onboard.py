@@ -2331,14 +2331,26 @@ class FirstBootApp:
         if not all_files:
             return None
 
+        latest_reply = self._scan_session_files_for_reply(all_files, session_marker, after_ms)
+        if latest_reply is None and session_marker:
+            self.append_log(f"DEBUG: marker过滤无结果，降级为搜索所有文件...")
+            latest_reply = self._scan_session_files_for_reply(all_files, "", after_ms)
+
+        if latest_reply:
+            self.append_log(f"DEBUG: _find_latest_bot_reply 返回结果: {latest_reply[0][:60]}")
+        else:
+            self.append_log(f"DEBUG: _find_latest_bot_reply 未找到匹配的assistant消息 (marker={session_marker[:20] if session_marker else 'EMPTY'}, after_ms={after_ms})")
+        return latest_reply
+
+    def _scan_session_files_for_reply(self, files: list[Path], marker: str, after_ms: int) -> tuple[str, int] | None:
         latest_reply: tuple[str, int] | None = None
-        for path in all_files:
+        for path in files:
             try:
                 payload = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
 
-            if session_marker and session_marker not in payload:
+            if marker and marker not in payload:
                 continue
 
             line_count = 0
@@ -2363,11 +2375,6 @@ class FirstBootApp:
                 if latest_reply is None or timestamp_ms >= latest_reply[1]:
                     latest_reply = (reply_text, timestamp_ms)
                     self.append_log(f"DEBUG: 发现候选回复 [{path.name}:{line_count}] ts={timestamp_ms} text={reply_text[:60]}")
-
-        if latest_reply:
-            self.append_log(f"DEBUG: _find_latest_bot_reply 返回结果: {latest_reply[0][:60]}")
-        else:
-            self.append_log(f"DEBUG: _find_latest_bot_reply 未找到匹配的assistant消息 (marker={session_marker[:20] if session_marker else 'EMPTY'}, after_ms={after_ms})")
         return latest_reply
 
     def _format_verification_reply(self, reply_text: str, reply_at_ms: int) -> str:
