@@ -510,9 +510,12 @@ class FirstBootApp:
             return
         if self.current_step == self.openrouter_step_index and self.model_id.get().strip():
             self._cancel_model_query("已选择可用模型，停止其余模型验证并进入下一步。")
-        if self.current_step == self.channel_step_index and self.install_weixin.get() and not self.weixin_login_requested:
-            messagebox.showerror("请先获取二维码", "请先在当前页面获取微信登录二维码，并完成扫码。")
-            return
+        if self.current_step == self.channel_step_index and self.install_weixin.get():
+            # 检查微信是否已连接（通过检查 account 文件是否存在）
+            account_info = self._resolve_weixin_account_info()
+            if not account_info:
+                messagebox.showerror("请先完成微信登录", "请先在当前页面获取微信登录二维码，并完成扫码。")
+                return
         if self.current_step == self.channel_step_index:
             self.run_setup()
             return
