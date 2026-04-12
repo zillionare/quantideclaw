@@ -47,6 +47,11 @@ MODEL_THRESHOLD = int(dt.datetime(2025, 10, 1, tzinfo=dt.timezone.utc).timestamp
 WELCOME_MESSAGE = "你好， Quantide Claw 欢迎你！"
 OPENCLAW_WRAPPER = Path("/usr/local/bin/quantideclaw-openclaw")
 DEFAULT_CONTROL_UI_URL = "http://127.0.0.1:18789/"
+DEFAULT_UI_LOCALE_ENV = {
+    "LANG": "zh_CN.UTF-8",
+    "LANGUAGE": "zh_CN:zh",
+    "LC_MESSAGES": "zh_CN.UTF-8",
+}
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 SHELL_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 REQUEST_ID_RE = re.compile(
@@ -1314,12 +1319,25 @@ class FirstBootApp:
         import shutil
         import subprocess
 
+        env = self._build_command_env()
+        dashboard_command = [self._resolve_openclaw_binary(), "dashboard"]
+        try:
+            subprocess.Popen(
+                dashboard_command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            return
+        except Exception:
+            pass
+
         url = self._resolve_control_console_url()
         browsers = ["firefox", "chromium", "chromium-browser", "google-chrome", "xdg-open"]
         for browser in browsers:
             if shutil.which(browser):
                 try:
-                    subprocess.Popen([browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.Popen([browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
                     return
                 except Exception:
                     continue
@@ -1344,6 +1362,8 @@ class FirstBootApp:
         env["OPENCLAW_CONFIG_PATH"] = str(self.config_path)
         env["OPENCLAW_WORKSPACE"] = str(self.workspace_dir)
         env["TERM"] = env.get("TERM") or "xterm-256color"
+        for key, value in DEFAULT_UI_LOCALE_ENV.items():
+            env.setdefault(key, value)
         return env
 
     def _resolve_openclaw_binary(self) -> str:
@@ -1572,7 +1592,7 @@ class FirstBootApp:
         ).pack(pady=(20, 10))
         tk.Label(
             self.weixin_qr_frame,
-            text="检测到二维码后会立刻显示，不会等待扫码完成",
+            text="请等待生成二维码...",
             font=("Noto Sans CJK SC", 10),
             bg="#f8f9fa",
             fg="#888888",
@@ -2611,6 +2631,14 @@ class FirstBootApp:
     def _open_models_page(self) -> None:
         self._open_url("https://openrouter.ai/models")
 
+    def _activate_dialog_modal(self, dialog: tk.Toplevel) -> None:
+        try:
+            dialog.update_idletasks()
+            dialog.wait_visibility()
+            dialog.grab_set()
+        except tk.TclError as exc:
+            self.append_log(f"WARN: 对话框无法设置为模态窗口: {exc}")
+
     def _show_help_dialog(self) -> None:
         """Show help dialog with OpenRouter image."""
         dialog = tk.Toplevel(self.root)
@@ -2618,7 +2646,6 @@ class FirstBootApp:
         dialog.geometry("700x600")
         dialog.configure(bg="#ffffff")
         dialog.transient(self.root)
-        dialog.grab_set()
 
         # Center the dialog
         dialog.update_idletasks()
@@ -2717,6 +2744,7 @@ class FirstBootApp:
             cursor="hand2",
         )
         close_btn.pack(expand=True)
+        self._activate_dialog_modal(dialog)
 
     def show_weixin_qr_dialog(self, qr_data: str) -> None:
         """Show WeChat login QR code in a dialog.
@@ -2729,7 +2757,6 @@ class FirstBootApp:
         dialog.geometry("400x500")
         dialog.configure(bg="#ffffff")
         dialog.transient(self.root)
-        dialog.grab_set()
         dialog.resizable(False, False)
 
         # Center the dialog
@@ -2851,6 +2878,7 @@ class FirstBootApp:
             cursor="hand2",
         )
         close_btn.pack(expand=True)
+        self._activate_dialog_modal(dialog)
 
     def _load_browser_note(self) -> str:
         if not self.browser_status_path.exists():
@@ -3232,8 +3260,11 @@ class FirstBootApp:
             gateway_token = secrets.token_hex(24)
 
         normalized_model_id = normalize_model_id(model_id)
+        managed_env: dict[str, object] = {"OPENROUTER_API_KEY": key}
+        managed_env.update(DEFAULT_UI_LOCALE_ENV)
+
         managed_config: dict[str, object] = {
-            "env": {"OPENROUTER_API_KEY": key},
+            "env": managed_env,
             "tools": {
                 "profile": "coding",
                 "web": {"search": {"enabled": True, "provider": "duckduckgo"}},
