@@ -119,6 +119,34 @@ reboot
 
 8. 验收通过后关机，导出或 clone 该虚拟机作为最终交付镜像。
 
+## 自动验收
+
+如果你只愿意额外做一件事，那就是：启动一台刚完成第二阶段的虚拟机。
+
+宿主机执行：
+
+```bash
+SSH_PASSWORD=root \
+  BUILD_USER=quantide \
+  bash ./scripts/verify-quantideclaw-image.sh
+```
+
+这个脚本会自动通过 SSH 做一轮二阶段镜像冒烟验收，重点检查：
+
+- `onboard.py`、`installer.env`、wrapper 和插件包是否真的进入镜像
+- 是否仍然错误使用 `OPENCLAW_HOME`，以及是否出现嵌套 `.openclaw/.openclaw`
+- OpenClaw 是否能发现微信/QQ 插件
+- 微信渠道是否能产出二维码链接，而不是报 `Unsupported channel`
+
+如果你只想跳过二维码生成测试，可加：
+
+```bash
+VERIFY_WEIXIN_LOGIN=0 \
+  SSH_PASSWORD=root \
+  BUILD_USER=quantide \
+  bash ./scripts/verify-quantideclaw-image.sh
+```
+
 ## 推荐发布流程
 
 1. 长期维护一份第一阶段完成后的基础镜像。
