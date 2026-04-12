@@ -166,32 +166,24 @@ ensure_corepack() {
 }
 
 install_nodejs() {
-    local required_version="22.14.0"
-    local installed_version=""
+	local required_version="22.14.0"
+	local installed_version=""
 
-    log_info "Installing Node.js..."
-    apt-get install -y --no-install-recommends nodejs npm || true
+	log_info "Installing Node.js 24.x from NodeSource..."
 
-    if command -v node >/dev/null 2>&1; then
-        installed_version="$(current_node_version)"
-        if [[ -n "${installed_version}" ]] && version_ge "${installed_version}" "${required_version}"; then
-            log_info "Using Debian Node.js v${installed_version}"
-            ensure_corepack
-            return 0
-        fi
-        log_info "Debian Node.js is insufficient, falling back to NodeSource 24.x..."
-    fi
+	# Directly install from NodeSource 24.x to avoid duplicate installation
+	curl --retry 3 --retry-all-errors -fsSL https://deb.nodesource.com/setup_24.x | bash -
+	apt-get install -y nodejs
 
-    curl --retry 3 --retry-all-errors -fsSL https://deb.nodesource.com/setup_24.x | bash -
-    apt-get install -y nodejs
-    installed_version="$(current_node_version)"
+	installed_version="$(current_node_version)"
 
-    if [[ -z "${installed_version}" ]] || ! version_ge "${installed_version}" "${required_version}"; then
-        log_error "Installed Node.js version is '${installed_version:-missing}', but >= ${required_version} is required."
-        exit 1
-    fi
+	if [[ -z "${installed_version}" ]] || ! version_ge "${installed_version}" "${required_version}" ]]; then
+		log_error "Installed Node.js version is '${installed_version:-missing}', but >= ${required_version} is required."
+		exit 1
+	fi
 
-    ensure_corepack
+	log_info "Node.js ${installed_version} installed successfully"
+	ensure_corepack
 }
 
 install_bun() {
@@ -204,32 +196,6 @@ record_status() {
     printf '%s\n' "$*" >>"${STATUS_FILE}"
 }
 
-install_chrome_best_effort() {
-    local chrome_deb="/tmp/google-chrome-stable.deb"
-
-    install -d -m 0755 "${STATUS_DIR}"
-    : >"${STATUS_FILE}"
-    if [[ "${TARGET_ARCH}" != "amd64" ]]; then
-        record_status "chrome=skipped reason=official_linux_amd64_only"
-        return 0
-    fi
-
-    if ! curl -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o "${chrome_deb}"; then
-        record_status "chrome=skipped reason=download_failed"
-        return 0
-    fi
-
-    if ! dpkg -i "${chrome_deb}"; then
-        apt-get install -f -y || true
-    fi
-    rm -f "${chrome_deb}"
-
-    if command -v google-chrome >/dev/null 2>&1; then
-        record_status "chrome=installed"
-    else
-        record_status "chrome=skipped reason=package_unavailable_after_install"
-    fi
-}
 
 repair_openclaw_runtime_deps() {
     local npm_root
@@ -597,6 +563,24 @@ cleanup_system() {
     find /var/log -type f -exec truncate -s 0 {} + 2>/dev/null || true
     find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find /usr/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+	# Enhanced cleanup for smaller image
+	rm -rf /usr/share/man/* 2>/dev/null || true
+	rm -rf /usr/share/doc/* 2>/dev/null || true
+	rm -rf /usr/share/info/* 2>/dev/null || true
+	rm -rf /usr/share/lintian/* 2>/dev/null || true
+	rm -rf /usr/share/linda/* 2>/dev/null || true
+
+	# Remove unused locales, keep Chinese and English
+	find /usr/share/locale -mindepth 1 -maxdepth 1 -type d \
+		! -name 'zh*' ! -name 'en*' ! -name 'locale.alias' \
+		-exec rm -rf {} + 2>/dev/null || true
+
+	# Clean npm cache if exists
+	rm -rf /root/.npm "/home/${BUILD_USER}/.npm" 2>/dev/null || true
+
+	# Clean pip cache
+	rm -rf /root/.pip "/home/${BUILD_USER}/.pip" 2>/dev/null || true
 }
 
 guest_main() {
@@ -641,8 +625,7 @@ host_main() {
     cat <<'EOF'
 Stage 2 will:
 1. Connect to the VM over SSH.
-2. Upload this stage script and its required product assets.
-3. Execute the product customization inside the VM as root.
+2. Upload this stage script and its required product assets.3. Execute the product customization inside the VM as root.
 
 You only need:
 - The VM powered on

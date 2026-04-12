@@ -98,10 +98,11 @@ install_desktop_packages() {
     local core_packages=(
         sudo ca-certificates curl wget git jq unzip zip xz-utils gnupg lsb-release
         dbus-x11 xauth xdg-utils python3 python3-pil
-        fonts-noto-cjk fonts-wqy-zenhei
+        fonts-wqy-zenhei
     )
     local desktop_packages=(
-        xorg accountsservice lightdm lightdm-gtk-greeter xfce4 xfce4-goodies
+        xorg accountsservice lightdm lightdm-gtk-greeter
+		xfce4 xfce4-session xfce4-panel xfce4-settings xfwm4 thunar xfce4-terminal xfce4-appfinder
         network-manager pavucontrol mesa-utils plymouth plymouth-themes
     )
     local audio_pkg=""
@@ -358,6 +359,24 @@ cleanup_system() {
     find /var/log -type f -exec truncate -s 0 {} + 2>/dev/null || true
     find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find /usr/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+	# Enhanced cleanup for smaller image
+	rm -rf /usr/share/man/* 2>/dev/null || true
+	rm -rf /usr/share/doc/* 2>/dev/null || true
+	rm -rf /usr/share/info/* 2>/dev/null || true
+	rm -rf /usr/share/lintian/* 2>/dev/null || true
+	rm -rf /usr/share/linda/* 2>/dev/null || true
+
+	# Remove unused locales, keep Chinese and English
+	find /usr/share/locale -mindepth 1 -maxdepth 1 -type d \
+		! -name 'zh*' ! -name 'en*' ! -name 'locale.alias' \
+		-exec rm -rf {} + 2>/dev/null || true
+
+	# Clean npm cache if exists
+	rm -rf /root/.npm "/home/${BUILD_USER}/.npm" 2>/dev/null || true
+
+	# Clean pip cache
+	rm -rf /root/.pip "/home/${BUILD_USER}/.pip" 2>/dev/null || true
 }
 
 guest_main() {
