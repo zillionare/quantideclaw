@@ -257,7 +257,9 @@ class FirstBootApp:
 
         self.env = load_env(INSTALLER_ENV)
         self.openclaw_home = expand_path(
-            self.env.get("OPENCLAW_HOME", str(Path.home() / ".openclaw"))
+            self.env.get("OPENCLAW_STATE_DIR")
+            or self.env.get("OPENCLAW_HOME")
+            or str(Path.home() / ".openclaw")
         )
         self.runtime_openclaw_home = Path.home() / ".openclaw"
         self.workspace_dir = expand_path(
@@ -1466,6 +1468,7 @@ class FirstBootApp:
             self.weixin_qr_url = "https://weixin.qq.com/mock-qr-for-preview"
             self._show_weixin_qr_in_frame("https://weixin.qq.com/mock-qr-for-preview")
             return
+        self._sync_channel_runtime_config()
         self._stop_weixin_login_process("正在重新获取微信二维码，已停止上一轮登录会话。")
         self.weixin_login_in_progress = True
         self.weixin_login_requested = False
@@ -2282,12 +2285,12 @@ class FirstBootApp:
         return target
 
     def _session_store_dir(self) -> Path:
-        candidates = [
-            self.config_path.parent / ".openclaw" / "agents" / "main" / "sessions",
-            self.config_path.parent / "agents" / "main" / "sessions",
-        ]
+        candidates = self._session_store_candidates()
         for candidate in candidates:
             if candidate.is_dir() and any(candidate.glob("*.jsonl")):
+                return candidate
+        for candidate in candidates:
+            if candidate.is_dir():
                 return candidate
         return candidates[0]
 
@@ -2964,6 +2967,59 @@ class FirstBootApp:
             "markdownSupport": True,
         }
 
+    def _merge_channel_runtime_config(self, config: dict[str, object]) -> dict[str, object]:
+        channels_config = config.get("channels")
+        if not isinstance(channels_config, dict):
+            channels_config = {}
+
+        qq_channel_config = self._build_qq_channel_config()
+        if qq_channel_config:
+            existing_qq_config = channels_config.get(self.qq_channel)
+            if isinstance(existing_qq_config, dict):
+                channels_config[self.qq_channel] = deep_merge_dict(existing_qq_config, qq_channel_config)
+            else:
+                channels_config[self.qq_channel] = qq_channel_config
+        config["channels"] = channels_config
+
+        plugins_config = config.get("plugins")
+        if not isinstance(plugins_config, dict):
+            plugins_config = {}
+
+        allow_list = plugins_config.get("allow")
+        if not isinstance(allow_list, list):
+            allow_list = []
+        allow_list = [
+            item for item in allow_list
+            if item not in {self.weixin_plugin_id, self.qq_channel, self.qq_plugin_id}
+        ]
+        if self.install_weixin.get():
+            allow_list.append(self.weixin_plugin_id)
+        if self.install_qqbot.get():
+            allow_list.append(self.qq_plugin_id)
+        plugins_config["allow"] = allow_list
+        config["plugins"] = plugins_config
+        return config
+
+    def _sync_channel_runtime_config(self) -> None:
+        if self.preview:
+            return
+
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_config: dict[str, object] = {}
+        if self.config_path.exists():
+            try:
+                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing_config = migrate_openclaw_config_schema(loaded)
+            except (OSError, json.JSONDecodeError):
+                self.append_log("WARN: 现有 openclaw.json 无法解析，将仅重建渠道插件配置。")
+
+        config = self._merge_channel_runtime_config(existing_config)
+        self.config_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def _extract_candidate(self, model: dict[str, object]) -> dict[str, object] | None:
         model_id = str(model.get("id") or "").strip()
         if not model_id:
@@ -3310,37 +3366,7 @@ class FirstBootApp:
         }
         config = deep_merge_dict(existing_config, managed_config)
         config = migrate_openclaw_config_schema(config)
-
-        channels_config = config.get("channels")
-        if not isinstance(channels_config, dict):
-            channels_config = {}
-
-        qq_channel_config = self._build_qq_channel_config()
-        if qq_channel_config:
-            existing_qq_config = channels_config.get(self.qq_channel)
-            if isinstance(existing_qq_config, dict):
-                channels_config[self.qq_channel] = deep_merge_dict(existing_qq_config, qq_channel_config)
-            else:
-                channels_config[self.qq_channel] = qq_channel_config
-        config["channels"] = channels_config
-
-        plugins_config = config.get("plugins")
-        if not isinstance(plugins_config, dict):
-            plugins_config = {}
-
-        allow_list = plugins_config.get("allow")
-        if not isinstance(allow_list, list):
-            allow_list = []
-        allow_list = [
-            item for item in allow_list
-            if item not in {self.weixin_plugin_id, self.qq_channel, self.qq_plugin_id}
-        ]
-        if self.install_weixin.get():
-            allow_list.append(self.weixin_plugin_id)
-        if self.install_qqbot.get():
-            allow_list.append(self.qq_plugin_id)
-        plugins_config["allow"] = allow_list
-        config["plugins"] = plugins_config
+        config = self._merge_channel_runtime_config(config)
         self.config_path.write_text(
             json.dumps(config, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -3646,11 +3672,22 @@ class FirstBootApp:
 
     def _channel_state_roots(self) -> list[Path]:
         roots: list[Path] = []
-        for root in (self.runtime_openclaw_home, self.openclaw_home):
+        for root in (self.runtime_openclaw_home, self.openclaw_home, self.config_path.parent):
             expanded = expand_path(str(root))
             if expanded not in roots:
                 roots.append(expanded)
         return roots
+
+    def _session_store_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        for root in self._channel_state_roots():
+            for candidate in (
+                root / "agents" / "main" / "sessions",
+                root / ".openclaw" / "agents" / "main" / "sessions",
+            ):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        return candidates
 
     def _resolve_weixin_account_info(self) -> dict[str, object] | None:
         candidates: list[tuple[str, dict[str, object]]] = []

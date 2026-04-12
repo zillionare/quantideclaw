@@ -95,6 +95,8 @@ ensure_payload_files() {
     require_payload edge_tts_proxy.py
     require_payload openrouter.jpg
     require_payload quantfans.png
+    require_payload tencent-weixin-openclaw-weixin-2.1.7.tgz
+    require_payload tencent-connect-openclaw-qqbot-1.7.1.tgz
 }
 
 version_ge() {
@@ -277,7 +279,7 @@ if [[ -r "${INSTALLER_ENV}" ]]; then
         value="$(trim "${raw_value}")"
         value="$(strip_matching_quotes "${value}")"
         case "${key}" in
-            OPENCLAW_HOME|OPENCLAW_ASSETS_DIR|OPENCLAW_CONFIG_PATH|OPENCLAW_WORKSPACE|WEIXIN_PLUGIN_PACKAGE|WEIXIN_CHANNEL|QQBOT_PLUGIN_PACKAGE|QQBOT_CHANNEL|EDGE_TTS_PROXY_URL|EDGE_TTS_DEFAULT_VOICE|CHROME_STATUS_FILE)
+            OPENCLAW_STATE_DIR|OPENCLAW_ASSETS_DIR|OPENCLAW_CONFIG_PATH|OPENCLAW_WORKSPACE|WEIXIN_PLUGIN_PACKAGE|WEIXIN_CHANNEL|QQBOT_PLUGIN_PACKAGE|QQBOT_CHANNEL|EDGE_TTS_PROXY_URL|EDGE_TTS_DEFAULT_VOICE|CHROME_STATUS_FILE)
                 export "${key}=${value}"
                 ;;
         esac
@@ -289,6 +291,7 @@ if [[ -z "${HOME:-}" ]]; then
     export HOME="${home_from_passwd:-/root}"
 fi
 
+export OPENCLAW_STATE_DIR="$(expand_leading_tilde "${OPENCLAW_STATE_DIR:-~/.openclaw}" "${HOME}")"
 export OPENCLAW_CONFIG_PATH="$(expand_leading_tilde "${OPENCLAW_CONFIG_PATH:-~/.openclaw/openclaw.json}" "${HOME}")"
 export OPENCLAW_WORKSPACE="$(expand_leading_tilde "${OPENCLAW_WORKSPACE:-~/.openclaw/workspace}" "${HOME}")"
 export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
@@ -337,12 +340,13 @@ install_weixin_plugin_for_user() {
 
         echo "[INFO] Installing weixin plugin from: $local_package" >&2
         rm -rf "$plugin_root/extensions/openclaw-weixin" "$plugin_root/hook-packs/openclaw-weixin"
-        OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
+        OPENCLAW_STATE_DIR="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
             /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1
         cat "$install_log"
         rm -f "$install_log"
     '; then
         log_error "Weixin plugin installation failed"
+        return 1
     fi
 }
 
@@ -361,19 +365,22 @@ install_qqbot_plugin_for_user() {
 
         echo "[INFO] Installing qqbot plugin from: $local_package" >&2
         rm -rf "$plugin_root/extensions/openclaw-qqbot" "$plugin_root/hook-packs/openclaw-qqbot"
-        OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
+        OPENCLAW_STATE_DIR="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
             /usr/local/bin/quantideclaw-openclaw plugins install --dangerously-force-unsafe-install "$local_package" >"$install_log" 2>&1
         cat "$install_log"
-        OPENCLAW_HOME="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
+        OPENCLAW_STATE_DIR="$plugin_root" OPENCLAW_ASSETS_DIR="/opt/quantideclaw-onboard/assets" \
             /usr/local/bin/quantideclaw-openclaw plugins disable qqbot || true
         rm -f "$install_log"
     '; then
         log_error "QQBot plugin installation failed"
+        return 1
     fi
 }
 
 install_openclaw() {
     log_info "Installing OpenClaw..."
+    local weixin_package_name="tencent-weixin-openclaw-weixin-2.1.7.tgz"
+    local qqbot_package_name="tencent-connect-openclaw-qqbot-1.7.1.tgz"
 
     install -d -m 0755 \
         "${ONBOARD_HOME}" \
@@ -382,6 +389,9 @@ install_openclaw() {
         "${RUNTIME_OPENCLAW_HOME}" \
         "${RUNTIME_OPENCLAW_WORKSPACE}"
 
+    copy_payload "${weixin_package_name}" "${ONBOARD_ASSET_DIR}/${weixin_package_name}"
+    copy_payload "${qqbot_package_name}" "${ONBOARD_ASSET_DIR}/${qqbot_package_name}"
+
     # Fix permissions for local plugin packages so BUILD_USER can read them
     if [[ -d /root/assets ]]; then
         chmod 755 /root/assets
@@ -389,7 +399,7 @@ install_openclaw() {
     fi
 
     cat >"${INSTALLER_ENV}" <<EOF
-OPENCLAW_HOME=${RUNTIME_OPENCLAW_HOME}
+OPENCLAW_STATE_DIR=${RUNTIME_OPENCLAW_HOME}
 OPENCLAW_ASSETS_DIR=${ONBOARD_ASSET_DIR}
 OPENCLAW_CONFIG_PATH=${RUNTIME_OPENCLAW_CONFIG_PATH}
 OPENCLAW_WORKSPACE=${RUNTIME_OPENCLAW_WORKSPACE}
@@ -478,6 +488,10 @@ LOG_DIR="${HOME}/.openclaw/logs"
 OPENCLAW_WRAPPER="/usr/local/bin/quantideclaw-openclaw"
 RESTART_GATEWAY=false
 
+gateway_is_running() {
+    pgrep -u "$(id -u)" -f "openclaw-gateway|openclaw gateway" >/dev/null 2>&1
+}
+
 if [[ -r /opt/quantideclaw-onboard/installer.env ]]; then
   while IFS='=' read -r key value; do
     case "${key}" in
@@ -499,7 +513,8 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
 fi
 
 if [[ "${RESTART_GATEWAY}" == true ]]; then
-  pkill -u "$(id -u)" -f "openclaw gateway" >/dev/null 2>&1 || true
+    "${OPENCLAW_WRAPPER}" gateway stop >/dev/null 2>&1 || true
+    pkill -u "$(id -u)" -f "openclaw-gateway|openclaw gateway" >/dev/null 2>&1 || true
   sleep 1
 fi
 
@@ -507,7 +522,7 @@ if ! pgrep -u "$(id -u)" -f "edge_tts_proxy.py" >/dev/null 2>&1; then
   nohup /usr/bin/python3 /opt/quantideclaw-onboard/edge_tts_proxy.py >>"${LOG_DIR}/edge-tts-proxy.log" 2>&1 &
 fi
 
-if ! pgrep -u "$(id -u)" -f "openclaw gateway" >/dev/null 2>&1; then
+if ! gateway_is_running; then
   nohup "${OPENCLAW_WRAPPER}" gateway --verbose >>"${LOG_DIR}/gateway.log" 2>&1 &
 fi
 EOF
